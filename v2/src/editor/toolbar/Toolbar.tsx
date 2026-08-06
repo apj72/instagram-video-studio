@@ -1,17 +1,28 @@
+import { canUndo, canRedo, undo, redo } from '../../core/commands.ts';
+import { isSaving } from '../../core/persistence.ts';
+
 interface ToolbarProps {
   onImportV1: () => void;
+  onExport: () => void;
+  onSave: () => void;
 }
 
-export function Toolbar({ onImportV1 }: ToolbarProps) {
+export function Toolbar({ onImportV1, onExport, onSave }: ToolbarProps) {
   return (
     <div class="toolbar">
       <div class="toolbar-brand">
         <span class="toolbar-logo">VERSION 1</span>
         <span class="toolbar-subtitle">STUDIO</span>
       </div>
+      <div class="toolbar-center">
+        <button class="toolbar-btn" onClick={undo} disabled={!canUndo.value} title="Undo (Cmd+Z)">Undo</button>
+        <button class="toolbar-btn" onClick={redo} disabled={!canRedo.value} title="Redo (Cmd+Shift+Z)">Redo</button>
+        {isSaving.value && <span class="toolbar-saving">Saving...</span>}
+      </div>
       <div class="toolbar-actions">
-        <button class="toolbar-btn" onClick={onImportV1}>Import V1 Config</button>
-        <button class="toolbar-btn toolbar-btn-primary">Export MP4</button>
+        <button class="toolbar-btn" onClick={onImportV1}>Import V1</button>
+        <button class="toolbar-btn" onClick={onSave}>Save</button>
+        <button class="toolbar-btn toolbar-btn-primary" onClick={onExport}>Export MP4</button>
       </div>
       <style>{toolbarStyles}</style>
     </div>
@@ -54,6 +65,23 @@ const toolbarStyles = `
 .toolbar-actions {
   display: flex;
   gap: 8px;
+}
+
+.toolbar-center {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-saving {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .toolbar-btn {

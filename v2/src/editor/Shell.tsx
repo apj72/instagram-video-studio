@@ -1,20 +1,27 @@
-import { useRef, useEffect, useCallback } from 'preact/hooks';
+import { useRef, useEffect, useCallback, useState } from 'preact/hooks';
 import { project, currentTime, isPlaying, selectedLayerId } from '../core/state.ts';
 import { createPreviewClock } from '../core/clock.ts';
 import { renderFrame } from '../render/engine.ts';
 import { importV1Config } from '../core/migration.ts';
 import { loadProject } from '../core/state.ts';
 import { playAudio, stopAudio, seekAudio, getAudioRenderData, audioLoaded } from '../audio/analyser.ts';
+import { initKeyboardShortcuts } from '../core/commands.ts';
+import { saveProject, startAutosave, stopAutosave } from '../core/persistence.ts';
+import { generateId } from '../core/schema.ts';
 import { Toolbar } from './toolbar/Toolbar.tsx';
 import { Sidebar } from './sidebar/Sidebar.tsx';
 import { TimelinePanel } from './timeline/TimelinePanel.tsx';
+import { ExportDialog } from './ExportDialog.tsx';
 
 const previewClock = createPreviewClock(16000);
 
 export function Shell() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const assetsRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const assetsRef = useRef<Map<string, HTMLImageElement | HTMLVideoElement>>(new Map());
   const rafRef = useRef(0);
+  const [showExport, setShowExport] = useState(false);
+
+  const projectIdRef = useRef(generateId());
 
   useEffect(() => {
     const logo = new Image();
@@ -23,6 +30,9 @@ export function Shell() {
       assetsRef.current.set('default-logo', logo);
       drawFrame(0);
     };
+    initKeyboardShortcuts();
+    startAutosave(() => project.value);
+    return () => { stopAutosave(); };
   }, []);
 
   const drawFrame = useCallback((timeMs: number) => {
@@ -121,9 +131,18 @@ export function Shell() {
     drawFrame(timeMs);
   }, [drawFrame]);
 
+  const handleSave = useCallback(async () => {
+    await saveProject(projectIdRef.current, project.value);
+  }, []);
+
+  const handleExport = useCallback(() => {
+    isPlaying.value = false;
+    setShowExport(true);
+  }, []);
+
   return (
     <div class="shell">
-      <Toolbar onImportV1={handleImportV1} />
+      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} />
       <div class="shell-main">
         <Sidebar />
         <div class="shell-canvas-area">
@@ -158,6 +177,12 @@ export function Shell() {
         </div>
       </div>
       <TimelinePanel onSeek={handleSeek} />
+      {showExport && (
+        <ExportDialog
+          assets={assetsRef.current}
+          onClose={() => setShowExport(false)}
+        />
+      )}
       <style>{shellStyles}</style>
     </div>
   );

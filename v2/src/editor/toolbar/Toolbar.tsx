@@ -5,9 +5,10 @@ interface ToolbarProps {
   onImportV1: () => void;
   onExport: () => void;
   onSave: () => void;
+  onNewFromTemplate: () => void;
 }
 
-export function Toolbar({ onImportV1, onExport, onSave }: ToolbarProps) {
+export function Toolbar({ onImportV1, onExport, onSave, onNewFromTemplate }: ToolbarProps) {
   return (
     <div class="toolbar">
       <div class="toolbar-brand">
@@ -20,6 +21,7 @@ export function Toolbar({ onImportV1, onExport, onSave }: ToolbarProps) {
         {isSaving.value && <span class="toolbar-saving">Saving...</span>}
       </div>
       <div class="toolbar-actions">
+        <button class="toolbar-btn" onClick={onNewFromTemplate}>Templates</button>
         <button class="toolbar-btn" onClick={onImportV1}>Import V1</button>
         <button class="toolbar-btn" onClick={onSave}>Save</button>
         <button class="toolbar-btn toolbar-btn-primary" onClick={onExport}>Export MP4</button>

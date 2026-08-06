@@ -1,10 +1,11 @@
-import { Output, Mp4OutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH } from 'mediabunny';
+import { Output, Mp4OutputFormat, BufferTarget, CanvasSource, AudioBufferSource, QUALITY_HIGH } from 'mediabunny';
 import type { Project } from '../core/schema.ts';
 import type { ExportPreset } from '../core/schema.ts';
 import { renderFrame } from '../render/engine.ts';
+import { getAudioBuffer } from '../audio/analyser.ts';
 
 export interface ExportProgress {
-  phase: 'encoding' | 'finalizing' | 'done' | 'error';
+  phase: 'encoding' | 'muxing-audio' | 'finalizing' | 'done' | 'error';
   currentFrame: number;
   totalFrames: number;
   percent: number;
@@ -12,6 +13,27 @@ export interface ExportProgress {
 }
 
 export type ProgressCallback = (progress: ExportProgress) => void;
+
+function trimAudioBuffer(
+  buffer: AudioBuffer,
+  startMs: number,
+  endMs: number,
+  ctx: OfflineAudioContext,
+): AudioBuffer {
+  const sr = buffer.sampleRate;
+  const startSample = Math.floor((startMs / 1000) * sr);
+  const endSample = Math.min(buffer.length, Math.ceil((endMs / 1000) * sr));
+  const length = endSample - startSample;
+  if (length <= 0) return ctx.createBuffer(buffer.numberOfChannels, 1, sr);
+
+  const trimmed = ctx.createBuffer(buffer.numberOfChannels, length, sr);
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const src = buffer.getChannelData(ch);
+    const dst = trimmed.getChannelData(ch);
+    dst.set(src.subarray(startSample, endSample));
+  }
+  return trimmed;
+}
 
 export async function exportMp4(
   project: Project,
@@ -36,12 +58,26 @@ export async function exportMp4(
     keyFrameInterval: 2,
   });
 
+  const audioBuffer = getAudioBuffer();
+  const hasAudio = audioBuffer !== null && !project.audio.muted;
+
+  let audioSource: AudioBufferSource | null = null;
+  if (hasAudio) {
+    audioSource = new AudioBufferSource({
+      codec: 'aac',
+      quality: QUALITY_HIGH,
+    });
+  }
+
   const output = new Output({
     format: new Mp4OutputFormat({ fastStart: 'in-memory' }),
     target,
   });
 
   output.addVideoTrack(videoSource);
+  if (audioSource) {
+    output.addAudioTrack(audioSource);
+  }
 
   for (let frame = 0; frame < totalFrames; frame++) {
     if (abortSignal?.aborted) {
@@ -60,16 +96,48 @@ export async function exportMp4(
         phase: 'encoding',
         currentFrame: frame + 1,
         totalFrames,
-        percent: ((frame + 1) / totalFrames) * 100,
+        percent: ((frame + 1) / totalFrames) * 90,
       });
     }
+  }
+
+  if (audioSource && audioBuffer) {
+    onProgress({
+      phase: 'muxing-audio',
+      currentFrame: totalFrames,
+      totalFrames,
+      percent: 92,
+    });
+
+    const offlineCtx = new OfflineAudioContext(
+      audioBuffer.numberOfChannels,
+      audioBuffer.length,
+      audioBuffer.sampleRate,
+    );
+
+    const offset = project.audio.offset;
+    const trimStart = project.audio.trim.start;
+    const trimEnd = project.audio.trim.end > 0 ? project.audio.trim.end : duration;
+    const trimmed = trimAudioBuffer(audioBuffer, trimStart + offset, Math.min(trimEnd + offset, duration + offset), offlineCtx);
+
+    const vol = project.audio.volume;
+    if (vol < 1) {
+      for (let ch = 0; ch < trimmed.numberOfChannels; ch++) {
+        const data = trimmed.getChannelData(ch);
+        for (let i = 0; i < data.length; i++) {
+          data[i] *= vol;
+        }
+      }
+    }
+
+    await audioSource.add(trimmed);
   }
 
   onProgress({
     phase: 'finalizing',
     currentFrame: totalFrames,
     totalFrames,
-    percent: 100,
+    percent: 95,
   });
 
   await output.finalize();

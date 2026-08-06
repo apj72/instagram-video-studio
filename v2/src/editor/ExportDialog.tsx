@@ -100,6 +100,7 @@ export function ExportDialog({ assets, onClose }: ExportDialogProps) {
           <div class="export-body">
             <div class="export-progress-label">
               {progress.phase === 'encoding' && `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`}
+              {progress.phase === 'muxing-audio' && 'Encoding audio (AAC)...'}
               {progress.phase === 'finalizing' && 'Finalizing MP4...'}
             </div>
             <div class="export-progress-bar">

@@ -12,6 +12,7 @@ import { Toolbar } from './toolbar/Toolbar.tsx';
 import { Sidebar } from './sidebar/Sidebar.tsx';
 import { TimelinePanel } from './timeline/TimelinePanel.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
+import { TemplateDialog } from './TemplateDialog.tsx';
 import { CanvasViewport } from './canvas/CanvasViewport.tsx';
 
 const previewClock = createPreviewClock(16000);
@@ -21,6 +22,7 @@ export function Shell() {
   const assetsRef = useRef<Map<string, HTMLImageElement | HTMLVideoElement>>(new Map());
   const rafRef = useRef(0);
   const [showExport, setShowExport] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
 
   const projectIdRef = useRef(generateId());
 
@@ -143,7 +145,7 @@ export function Shell() {
 
   return (
     <div class="shell">
-      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} />
+      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} onNewFromTemplate={() => setShowTemplates(true)} />
       <div class="shell-main">
         <Sidebar />
         <div class="shell-canvas-area">
@@ -173,6 +175,9 @@ export function Shell() {
           assets={assetsRef.current}
           onClose={() => setShowExport(false)}
         />
+      )}
+      {showTemplates && (
+        <TemplateDialog onClose={() => setShowTemplates(false)} />
       )}
       <style>{shellStyles}</style>
     </div>

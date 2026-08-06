@@ -1,21 +1,88 @@
-import { useRef, useCallback } from 'preact/hooks';
-import { project, currentTime, selectedLayerId, zoom } from '../../core/state.ts';
+import { useRef, useCallback, useState } from 'preact/hooks';
+import { signal } from '@preact/signals';
+import { project, currentTime, selectedLayerId, zoom, updateLayer } from '../../core/state.ts';
+import { evaluateProperty } from '../../timeline/interpolation.ts';
+import type { Layer, AnimatedProperty, EasingType, Keyframe } from '../../core/schema.ts';
 
 interface TimelinePanelProps {
   onSeek: (timeMs: number) => void;
 }
 
+export const selectedPropertyName = signal<string>('opacity');
+
+interface AnimPropEntry {
+  name: string;
+  path: string[];
+  prop: AnimatedProperty;
+}
+
+function getAnimatedProperties(layer: Layer): AnimPropEntry[] {
+  const entries: AnimPropEntry[] = [
+    { name: 'opacity', path: ['opacity'], prop: layer.opacity },
+    { name: 'pos X', path: ['position', 'x'], prop: layer.position.x },
+    { name: 'pos Y', path: ['position', 'y'], prop: layer.position.y },
+    { name: 'scale X', path: ['scale', 'x'], prop: layer.scale.x },
+    { name: 'scale Y', path: ['scale', 'y'], prop: layer.scale.y },
+    { name: 'rotation', path: ['rotation'], prop: layer.rotation },
+  ];
+  if (layer.type === 'text') {
+    entries.push({ name: 'fontSize', path: ['fontSize'], prop: layer.fontSize });
+  }
+  return entries;
+}
+
+function setNestedProp(obj: Record<string, unknown>, path: string[], value: unknown): Record<string, unknown> {
+  if (path.length === 1) {
+    return { ...obj, [path[0]]: value };
+  }
+  return {
+    ...obj,
+    [path[0]]: setNestedProp(obj[path[0]] as Record<string, unknown>, path.slice(1), value),
+  };
+}
+
+const PROPERTY_COLORS: Record<string, string> = {
+  opacity: '#FFD700',
+  'pos X': '#4FC3F7',
+  'pos Y': '#4DB6AC',
+  'scale X': '#FF8A65',
+  'scale Y': '#FF7043',
+  rotation: '#BA68C8',
+  fontSize: '#AED581',
+};
+
+const EASING_OPTIONS: EasingType[] = [
+  'linear', 'ease-in', 'ease-out', 'ease-in-out',
+  'ease-out-cubic', 'ease-out-expo', 'ease-out-back',
+  'spring', 'bounce',
+];
+
 export function TimelinePanel({ onSeek }: TimelinePanelProps) {
   const layers = project.value.layers;
   const dur = project.value.settings.duration;
-  const bpm = project.value.settings.bpm;
+  const bpmVal = project.value.settings.bpm;
   const time = currentTime.value;
   const z = zoom.value;
   const rulerRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
+  const [draggingKf, setDraggingKf] = useState<{
+    layerId: string;
+    path: string[];
+    kfIndex: number;
+    startX: number;
+    origTime: number;
+  } | null>(null);
+  const [easingMenu, setEasingMenu] = useState<{
+    layerId: string;
+    path: string[];
+    kfIndex: number;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const totalWidth = z * 100;
   const playheadPct = dur > 0 ? (time / dur) * 100 : 0;
+  const propName = selectedPropertyName.value;
 
   const handleRulerClick = useCallback((e: MouseEvent) => {
     const el = rulerRef.current;
@@ -38,23 +105,143 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     zoom.value = parseFloat((e.target as HTMLInputElement).value);
   }, []);
 
-  const beatIntervalMs = bpm > 0 ? (60 / bpm) * 1000 : 0;
+  const handleAddKeyframe = useCallback((layerId: string, clickPct: number) => {
+    const layer = project.value.layers.find(l => l.id === layerId);
+    if (!layer) return;
+    const entries = getAnimatedProperties(layer);
+    const entry = entries.find(e => e.name === propName);
+    if (!entry) return;
+
+    const timeMs = clickPct * dur;
+    const value = evaluateProperty(entry.prop, timeMs);
+    const newKf: Keyframe = { time: timeMs, value, easing: 'linear' };
+    const newKeyframes = [...entry.prop.keyframes, newKf].sort((a, b) => a.time - b.time);
+    const newProp: AnimatedProperty = { keyframes: newKeyframes };
+
+    updateLayer(layerId, l => setNestedProp(l as unknown as Record<string, unknown>, entry.path, newProp) as unknown as Layer);
+  }, [propName, dur]);
+
+  const handleKeyframeMouseDown = useCallback((
+    e: MouseEvent,
+    layerId: string,
+    path: string[],
+    kfIndex: number,
+    kfTime: number,
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setDraggingKf({ layerId, path, kfIndex, startX: e.clientX, origTime: kfTime });
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!draggingKf) return;
+    const trackEl = trackAreaRef.current;
+    if (!trackEl) return;
+    const rect = trackEl.getBoundingClientRect();
+    const pxPerMs = (rect.width * (totalWidth / 100)) / dur;
+    const dx = e.clientX - draggingKf.startX;
+    const newTime = Math.max(0, Math.min(dur, draggingKf.origTime + dx / pxPerMs));
+
+    updateLayer(draggingKf.layerId, l => {
+      const entries = getAnimatedProperties(l);
+      const entry = entries.find(en => en.path.join('.') === draggingKf.path.join('.'));
+      if (!entry) return l;
+      const kfs = [...entry.prop.keyframes];
+      kfs[draggingKf.kfIndex] = { ...kfs[draggingKf.kfIndex], time: newTime };
+      kfs.sort((a, b) => a.time - b.time);
+      const newIdx = kfs.findIndex(k => k.time === newTime && k.value === entry.prop.keyframes[draggingKf.kfIndex].value);
+      if (newIdx !== draggingKf.kfIndex) {
+        setDraggingKf(prev => prev ? { ...prev, kfIndex: newIdx >= 0 ? newIdx : prev.kfIndex } : null);
+      }
+      return setNestedProp(l as unknown as Record<string, unknown>, entry.path, { keyframes: kfs }) as unknown as Layer;
+    });
+  }, [draggingKf, totalWidth, dur]);
+
+  const handleMouseUp = useCallback(() => {
+    setDraggingKf(null);
+  }, []);
+
+  const handleKeyframeContextMenu = useCallback((
+    e: MouseEvent,
+    layerId: string,
+    path: string[],
+    kfIndex: number,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setEasingMenu({ layerId, path, kfIndex, x: e.clientX, y: e.clientY });
+  }, []);
+
+  const handleDeleteKeyframe = useCallback((layerId: string, path: string[], kfIndex: number) => {
+    updateLayer(layerId, l => {
+      const entries = getAnimatedProperties(l);
+      const entry = entries.find(en => en.path.join('.') === path.join('.'));
+      if (!entry) return l;
+      if (entry.prop.keyframes.length <= 1) return l;
+      const kfs = entry.prop.keyframes.filter((_, i) => i !== kfIndex);
+      return setNestedProp(l as unknown as Record<string, unknown>, entry.path, { keyframes: kfs }) as unknown as Layer;
+    });
+    setEasingMenu(null);
+  }, []);
+
+  const handleChangeEasing = useCallback((layerId: string, path: string[], kfIndex: number, easing: EasingType) => {
+    updateLayer(layerId, l => {
+      const entries = getAnimatedProperties(l);
+      const entry = entries.find(en => en.path.join('.') === path.join('.'));
+      if (!entry) return l;
+      const kfs = [...entry.prop.keyframes];
+      kfs[kfIndex] = { ...kfs[kfIndex], easing };
+      return setNestedProp(l as unknown as Record<string, unknown>, entry.path, { keyframes: kfs }) as unknown as Layer;
+    });
+    setEasingMenu(null);
+  }, []);
+
+  const handleTrackBarClick = useCallback((e: MouseEvent, layerId: string) => {
+    const target = e.currentTarget as HTMLDivElement;
+    const rect = target.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const pct = clickX / rect.width;
+    handleAddKeyframe(layerId, pct);
+  }, [handleAddKeyframe]);
+
+  const beatIntervalMs = bpmVal > 0 ? (60 / bpmVal) * 1000 : 0;
 
   return (
-    <div class="timeline-panel">
+    <div
+      class="timeline-panel"
+      onMouseMove={draggingKf ? handleMouseMove : undefined}
+      onMouseUp={draggingKf ? handleMouseUp : undefined}
+      onMouseLeave={draggingKf ? handleMouseUp : undefined}
+    >
       <div class="timeline-toolbar">
         <span class="timeline-toolbar-label">Timeline</span>
-        <div class="timeline-zoom">
-          <span class="timeline-zoom-label">Zoom</span>
-          <input
-            type="range"
-            min="1"
-            max="10"
-            step="0.5"
-            value={z}
-            onInput={handleZoomChange}
-            class="timeline-zoom-slider"
-          />
+        <div class="timeline-toolbar-controls">
+          <label class="tl-prop-label">Property:</label>
+          <select
+            class="tl-prop-select"
+            value={propName}
+            onChange={(e) => { selectedPropertyName.value = (e.target as HTMLSelectElement).value; }}
+          >
+            <option value="opacity">Opacity</option>
+            <option value="pos X">Position X</option>
+            <option value="pos Y">Position Y</option>
+            <option value="scale X">Scale X</option>
+            <option value="scale Y">Scale Y</option>
+            <option value="rotation">Rotation</option>
+            <option value="fontSize">Font Size</option>
+          </select>
+          <div class="timeline-zoom">
+            <span class="timeline-zoom-label">Zoom</span>
+            <input
+              type="range"
+              min="1"
+              max="10"
+              step="0.5"
+              value={z}
+              onInput={handleZoomChange}
+              class="timeline-zoom-slider"
+            />
+          </div>
         </div>
       </div>
       <div class="timeline-body">
@@ -88,32 +275,81 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
             class="timeline-tracks"
             onScroll={handleTrackScroll}
           >
-            {layers.map(layer => (
-              <div
-                key={layer.id}
-                class={`timeline-track ${selectedLayerId.value === layer.id ? 'timeline-track-selected' : ''}`}
-                onClick={() => { selectedLayerId.value = layer.id; }}
-              >
-                <div class="track-bar-area" style={{ width: `${totalWidth}%` }}>
-                  <div
-                    class="track-bar"
-                    style={{
-                      left: `${(layer.inTime / dur) * 100}%`,
-                      width: `${((layer.outTime - layer.inTime) / dur) * 100}%`,
-                    }}
-                  >
-                    <span class="track-bar-label">{layer.name}</span>
+            {layers.map(layer => {
+              const entries = getAnimatedProperties(layer);
+              const selectedEntry = entries.find(e => e.name === propName);
+              return (
+                <div
+                  key={layer.id}
+                  class={`timeline-track ${selectedLayerId.value === layer.id ? 'timeline-track-selected' : ''}`}
+                  onClick={() => { selectedLayerId.value = layer.id; }}
+                >
+                  <div class="track-bar-area" style={{ width: `${totalWidth}%` }}>
+                    <div
+                      class="track-bar"
+                      style={{
+                        left: `${(layer.inTime / dur) * 100}%`,
+                        width: `${((layer.outTime - layer.inTime) / dur) * 100}%`,
+                      }}
+                      onDblClick={(e) => handleTrackBarClick(e, layer.id)}
+                    >
+                      <span class="track-bar-label">{layer.name}</span>
+                      {selectedEntry && selectedEntry.prop.keyframes.map((kf, ki) => {
+                        const kfPct = dur > 0 ? ((kf.time - layer.inTime) / (layer.outTime - layer.inTime)) * 100 : 0;
+                        if (kfPct < 0 || kfPct > 100) return null;
+                        const color = PROPERTY_COLORS[propName] ?? '#FFD700';
+                        return (
+                          <div
+                            key={`${selectedEntry.name}-${ki}`}
+                            class="kf-diamond"
+                            style={{ left: `${kfPct}%`, borderColor: color }}
+                            title={`${selectedEntry.name}: ${kf.value.toFixed(2)} @ ${(kf.time / 1000).toFixed(2)}s [${kf.easing}]`}
+                            onMouseDown={(e) => handleKeyframeMouseDown(e, layer.id, selectedEntry.path, ki, kf.time)}
+                            onContextMenu={(e) => handleKeyframeContextMenu(e, layer.id, selectedEntry.path, ki)}
+                          />
+                        );
+                      })}
+                    </div>
+                    <div class="timeline-playhead-track" style={{ left: `${playheadPct / z}%` }} />
                   </div>
-                  <div class="timeline-playhead-track" style={{ left: `${playheadPct / z}%` }} />
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {layers.length === 0 && (
               <div class="timeline-empty">No layers</div>
             )}
           </div>
         </div>
       </div>
+
+      {easingMenu && (
+        <div
+          class="kf-context-menu"
+          style={{ left: `${easingMenu.x}px`, top: `${easingMenu.y}px` }}
+        >
+          <div class="kf-menu-header">Easing</div>
+          {EASING_OPTIONS.map(easing => (
+            <button
+              key={easing}
+              class="kf-menu-item"
+              onClick={() => handleChangeEasing(easingMenu.layerId, easingMenu.path, easingMenu.kfIndex, easing)}
+            >
+              {easing}
+            </button>
+          ))}
+          <div class="kf-menu-divider" />
+          <button
+            class="kf-menu-item kf-menu-delete"
+            onClick={() => handleDeleteKeyframe(easingMenu.layerId, easingMenu.path, easingMenu.kfIndex)}
+          >
+            Delete keyframe
+          </button>
+        </div>
+      )}
+      {easingMenu && (
+        <div class="kf-menu-backdrop" onClick={() => setEasingMenu(null)} />
+      )}
+
       <style>{timelineStyles}</style>
     </div>
   );
@@ -189,6 +425,26 @@ const timelineStyles = `
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--text-secondary);
+}
+
+.timeline-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tl-prop-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.tl-prop-select {
+  font-size: 10px;
+  padding: 2px 4px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
 }
 
 .timeline-zoom {
@@ -350,7 +606,7 @@ const timelineStyles = `
   display: flex;
   align-items: center;
   padding: 0 6px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .track-bar-label {
@@ -359,10 +615,83 @@ const timelineStyles = `
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 .timeline-track-selected .track-bar {
   opacity: 0.6;
+}
+
+.kf-diamond {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  background: var(--bg-secondary);
+  border: 2px solid #FFD700;
+  cursor: grab;
+  z-index: 3;
+  transition: background 0.1s;
+  pointer-events: auto;
+}
+.kf-diamond:hover {
+  background: #FFD700;
+}
+
+.kf-context-menu {
+  position: fixed;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  z-index: 100;
+  min-width: 140px;
+  padding: 4px 0;
+}
+
+.kf-menu-header {
+  padding: 4px 12px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+
+.kf-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.kf-menu-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.kf-menu-delete {
+  color: var(--accent);
+}
+.kf-menu-delete:hover {
+  background: rgba(232, 66, 63, 0.15);
+}
+
+.kf-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.kf-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
 }
 
 .timeline-empty {

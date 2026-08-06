@@ -3,6 +3,7 @@ import type { Layer } from '../../core/schema.ts';
 import { AudioPanel } from './AudioPanel.tsx';
 import { SettingsPanel } from './SettingsPanel.tsx';
 import { AddLayerPanel } from './AddLayerPanel.tsx';
+import { MotionPanel } from './MotionPanel.tsx';
 
 const LAYER_TYPE_ICONS: Record<string, string> = {
   'image': 'IMG',
@@ -23,6 +24,7 @@ export function Sidebar() {
       <SettingsPanel />
       <AudioPanel />
       <AddLayerPanel />
+      <MotionPanel />
       <div class="sidebar-section">
         <div class="sidebar-header">
           <span>Layers</span>

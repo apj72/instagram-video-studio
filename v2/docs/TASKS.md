@@ -39,24 +39,32 @@
 - [x] Timeline UI with zoom slider
 - [x] Beat markers and downbeat emphasis
 - [x] Audio panel (volume, mute, BPM, beat offset)
-- [ ] Keyframe editing in timeline
+- [x] Keyframe editing in timeline (diamonds, drag, easing, delete)
+- [x] Property selector for keyframe editing
 - [ ] Track clip dragging and reordering
 - [ ] Snap to beat grid
 
 ## Phase 4: Canvas Interaction
 
-- [ ] Click-to-select layers on canvas
-- [ ] Transform handles (move, resize, rotate)
+- [x] Click-to-select layers on canvas
+- [x] Drag-to-move layers on canvas
+- [x] Arrow key nudging (0.002 step, 0.01 with Shift)
+- [x] Instagram safe area overlays (Reel, Feed 4:5, Grid 1:1)
+- [x] Selection bounds with corner handles
+- [x] Delete/Backspace to remove selected layer
+- [x] Project settings panel (duration, FPS, BG color, seed, safe areas)
+- [x] Add layer panel (all layer and effect types)
+- [ ] Resize handles (corner/edge)
+- [ ] Rotation handles
 - [ ] Snapping and alignment guides
-- [ ] Instagram safe area overlays
 
 ## Phase 5: State Management & Persistence
 
 - [x] Command pattern undo/redo with Cmd+Z/Cmd+Shift+Z
 - [x] IndexedDB project storage
 - [x] Autosave every 30 seconds
-- [ ] Preset system
 - [ ] Brand kit
+- [ ] .v2proj file export/import
 
 ## Phase 6: Export Pipeline
 
@@ -64,15 +72,18 @@
 - [x] Mediabunny MP4 muxer with fast-start (in-memory)
 - [x] Export dialog with format presets and progress
 - [x] MediaRecorder fallback (WebM)
-- [ ] AAC audio encoding
+- [x] AAC audio encoding via Mediabunny AudioBufferSource
+- [x] Audio trim, volume, offset applied during export
 - [ ] Export validation (codec/dimensions check)
 
 ## Phase 7: Templates & Polish
 
-- [ ] Motion presets (entrance/exit animations)
-- [ ] Starter templates
+- [x] Motion presets (14 presets: entrance/exit/emphasis)
+- [x] Motion panel in sidebar
+- [x] 5 Starter templates (DJ Line-Up, Event Promo, Track Release, Countdown, Logo Sting)
+- [x] Template browser dialog
 - [ ] Brand kit system
-- [ ] Keyboard shortcuts (beyond undo/redo)
+- [ ] Additional keyboard shortcuts
 
 ## Phase 8: Testing & Quality
 

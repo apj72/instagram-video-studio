@@ -23,7 +23,7 @@ export function Toolbar({ onImportV1, onExport, onSave, onNewFromTemplate }: Too
       <div class="toolbar-actions">
         <button class="toolbar-btn" onClick={onNewFromTemplate}>Templates</button>
         <button class="toolbar-btn" onClick={onImportV1}>Import V1</button>
-        <button class="toolbar-btn" onClick={onSave}>Save</button>
+        <button class="toolbar-btn" onClick={onSave} title="Save (Cmd+S)">Save</button>
         <button class="toolbar-btn toolbar-btn-primary" onClick={onExport}>Export MP4</button>
       </div>
       <style>{toolbarStyles}</style>

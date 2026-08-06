@@ -35,7 +35,24 @@ export function Shell() {
     };
     initKeyboardShortcuts();
     startAutosave(() => project.value);
-    return () => { stopAutosave(); };
+
+    const handleGlobalKeys = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      if (e.key === ' ') {
+        e.preventDefault();
+        isPlaying.value = !isPlaying.value;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        saveProject(projectIdRef.current, project.value);
+      }
+    };
+    document.addEventListener('keydown', handleGlobalKeys);
+
+    return () => {
+      stopAutosave();
+      document.removeEventListener('keydown', handleGlobalKeys);
+    };
   }, []);
 
   const drawFrame = useCallback((timeMs: number) => {

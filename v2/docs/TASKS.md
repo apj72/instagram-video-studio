@@ -14,23 +14,34 @@
 - [x] Reactive state with signals (`core/state.ts`)
 - [x] Editor shell: Toolbar, Sidebar, Timeline, Canvas viewport
 - [x] Living documents
-- [ ] First commit on v2-development branch
+- [x] First commit on v2-development branch
 
 ## Phase 2: Core Rendering
 
-- [ ] Port all V1 effects with deterministic rendering
-- [ ] Typography engine with FontFace API
-- [ ] Video layer rendering
-- [ ] Shape layer rendering
+- [x] Port all V1 effects with deterministic rendering
+- [x] Video layer rendering
+- [x] Shape layer rendering
+- [x] Letter spacing in text rendering
+- [x] Master alpha + instrument alpha envelopes
+- [x] Spectrum smoothing with peak hold
+- [x] V1-matching waveform (256 points, fill, 18px glow)
+- [x] V1-matching audio simulation (layered harmonics)
+- [x] Noise rectangles in glitch effect
+- [x] Particle system
+- [ ] Typography engine with FontFace API (advanced)
 - [ ] Group layer support
 
 ## Phase 3: Timeline & Audio
 
-- [ ] Timeline data model (tracks, clips, keyframes)
-- [ ] Timeline UI with scrubbing and zoom
-- [ ] Web Audio API analyser
-- [ ] BPM detection
-- [ ] Beat grid overlay and snapping
+- [x] Web Audio API analyser with AnalyserNode
+- [x] BPM detection (onset energy autocorrelation)
+- [x] Audio file loading and playback sync
+- [x] Timeline UI with zoom slider
+- [x] Beat markers and downbeat emphasis
+- [x] Audio panel (volume, mute, BPM, beat offset)
+- [ ] Keyframe editing in timeline
+- [ ] Track clip dragging and reordering
+- [ ] Snap to beat grid
 
 ## Phase 4: Canvas Interaction
 
@@ -41,25 +52,27 @@
 
 ## Phase 5: State Management & Persistence
 
-- [ ] Command pattern undo/redo
-- [ ] IndexedDB project storage
-- [ ] Autosave and crash recovery
+- [x] Command pattern undo/redo with Cmd+Z/Cmd+Shift+Z
+- [x] IndexedDB project storage
+- [x] Autosave every 30 seconds
 - [ ] Preset system
+- [ ] Brand kit
 
 ## Phase 6: Export Pipeline
 
-- [ ] WebCodecs H.264 encoder
+- [x] WebCodecs H.264 encoder via Mediabunny CanvasSource
+- [x] Mediabunny MP4 muxer with fast-start (in-memory)
+- [x] Export dialog with format presets and progress
+- [x] MediaRecorder fallback (WebM)
 - [ ] AAC audio encoding
-- [ ] Mediabunny MP4 muxer with fast-start
-- [ ] Export presets (Reel, Story, Feed)
-- [ ] MediaRecorder fallback
+- [ ] Export validation (codec/dimensions check)
 
 ## Phase 7: Templates & Polish
 
 - [ ] Motion presets (entrance/exit animations)
 - [ ] Starter templates
 - [ ] Brand kit system
-- [ ] Keyboard shortcuts
+- [ ] Keyboard shortcuts (beyond undo/redo)
 
 ## Phase 8: Testing & Quality
 

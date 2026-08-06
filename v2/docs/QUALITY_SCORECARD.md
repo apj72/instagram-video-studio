@@ -6,12 +6,14 @@
 |------|--------|---------|--------|
 | TypeScript strict compile | 0 errors | 0 errors | PASS |
 | V1 config import | All fields mapped | Implemented | UNTESTED |
-| Deterministic render | Same seed+frame = same pixels | Clock + PRNG built | UNTESTED |
-| Canvas 30fps preview | No frame drops at 1080x1920 | Basic loop running | UNTESTED |
-| MP4 export | H.264 + AAC, fast-start | Not started | - |
-| Undo/redo | All edits reversible | Not started | - |
-| Project persistence | Save/load cycle | Not started | - |
-| Accessibility | Keyboard nav, focus visible | Focus-visible on buttons | PARTIAL |
+| Deterministic render | Same seed+frame = same pixels | Clock + PRNG + seeded glitch | UNTESTED |
+| Canvas 30fps preview | No frame drops at 1080x1920 | rAF loop running | UNTESTED |
+| MP4 export | H.264, fast-start | CanvasSource + BufferTarget | UNTESTED |
+| Undo/redo | All edits reversible | Command stack implemented | PARTIAL |
+| Project persistence | Save/load cycle | IndexedDB + autosave | UNTESTED |
+| Audio analysis | Real FFT spectrum | Web Audio AnalyserNode | UNTESTED |
+| BPM detection | Auto-detect 80-180 BPM | Onset autocorrelation | UNTESTED |
+| Accessibility | Keyboard nav, focus visible | Focus-visible + undo shortcuts | PARTIAL |
 
 ## Benchmarks
 
@@ -22,4 +24,6 @@
 
 ## Known Issues
 
-None tracked yet.
+- Export does not yet include audio (AAC encoding not implemented)
+- Particles use module-level mutable state (not fully deterministic across runs)
+- Spectrum smoothing state is module-level (shared across projects)

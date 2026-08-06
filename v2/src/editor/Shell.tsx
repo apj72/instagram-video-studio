@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from 'preact/hooks';
-import { project, currentTime, isPlaying, selectedLayerId } from '../core/state.ts';
+import { project, currentTime, isPlaying } from '../core/state.ts';
 import { createPreviewClock } from '../core/clock.ts';
 import { renderFrame } from '../render/engine.ts';
 import { importV1Config } from '../core/migration.ts';
@@ -12,6 +12,7 @@ import { Toolbar } from './toolbar/Toolbar.tsx';
 import { Sidebar } from './sidebar/Sidebar.tsx';
 import { TimelinePanel } from './timeline/TimelinePanel.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
+import { CanvasViewport } from './canvas/CanvasViewport.tsx';
 
 const previewClock = createPreviewClock(16000);
 
@@ -146,17 +147,7 @@ export function Shell() {
       <div class="shell-main">
         <Sidebar />
         <div class="shell-canvas-area">
-          <div class="canvas-viewport">
-            <canvas
-              ref={canvasRef}
-              width={project.value.settings.width}
-              height={project.value.settings.height}
-              class="preview-canvas"
-              onClick={() => {
-                selectedLayerId.value = null;
-              }}
-            />
-          </div>
+          <CanvasViewport canvasRef={canvasRef} />
           <div class="transport-bar">
             <button class="transport-btn" onClick={handlePlayPause}>
               {isPlaying.value ? '⏸' : '▶'}
@@ -216,24 +207,6 @@ const shellStyles = `
   flex-direction: column;
   background: var(--bg-primary);
   overflow: hidden;
-}
-
-.canvas-viewport {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  padding: 16px;
-  background: #080808;
-}
-
-.preview-canvas {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  border-radius: var(--radius-sm);
-  box-shadow: 0 0 40px rgba(0,0,0,0.5);
 }
 
 .transport-bar {

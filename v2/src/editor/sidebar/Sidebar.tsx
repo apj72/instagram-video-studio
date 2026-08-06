@@ -1,5 +1,6 @@
 import { project, selectedLayerId, selectedLayer, updateLayer, removeLayer, reorderLayers } from '../../core/state.ts';
 import type { Layer } from '../../core/schema.ts';
+import { AudioPanel } from './AudioPanel.tsx';
 
 const LAYER_TYPE_ICONS: Record<string, string> = {
   'image': 'IMG',
@@ -70,6 +71,8 @@ export function Sidebar() {
           )}
         </div>
       </div>
+
+      <AudioPanel />
 
       {selected && (
         <div class="sidebar-section">

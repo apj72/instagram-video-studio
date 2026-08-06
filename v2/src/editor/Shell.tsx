@@ -4,6 +4,7 @@ import { createPreviewClock } from '../core/clock.ts';
 import { renderFrame } from '../render/engine.ts';
 import { importV1Config } from '../core/migration.ts';
 import { loadProject } from '../core/state.ts';
+import { playAudio, stopAudio, seekAudio, getAudioRenderData, audioLoaded } from '../audio/analyser.ts';
 import { Toolbar } from './toolbar/Toolbar.tsx';
 import { Sidebar } from './sidebar/Sidebar.tsx';
 import { TimelinePanel } from './timeline/TimelinePanel.tsx';
@@ -31,7 +32,8 @@ export function Shell() {
     if (!ctx) return;
     const p = project.value;
     const frameNumber = Math.floor(timeMs / (1000 / p.settings.fps));
-    renderFrame(p, ctx, timeMs, frameNumber, assetsRef.current, null);
+    const audioData = audioLoaded.value ? getAudioRenderData() : null;
+    renderFrame(p, ctx, timeMs, frameNumber, assetsRef.current, audioData);
   }, []);
 
   useEffect(() => {
@@ -57,8 +59,10 @@ export function Shell() {
   useEffect(() => {
     if (isPlaying.value) {
       previewClock.start();
+      if (audioLoaded.value) playAudio(currentTime.value);
     } else {
       previewClock.stop();
+      if (audioLoaded.value) stopAudio();
     }
   }, [isPlaying.value]);
 
@@ -113,6 +117,7 @@ export function Shell() {
   const handleSeek = useCallback((timeMs: number) => {
     currentTime.value = timeMs;
     previewClock.seek(timeMs);
+    if (audioLoaded.value) seekAudio(timeMs);
     drawFrame(timeMs);
   }, [drawFrame]);
 

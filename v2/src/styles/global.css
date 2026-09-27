@@ -5,6 +5,27 @@
   font-style: normal;
 }
 
+@font-face {
+  font-family: 'Permanent Marker';
+  src: url('/assets/fonts/PermanentMarker-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'Space Mono';
+  src: url('/assets/fonts/SpaceMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'Space Mono';
+  src: url('/assets/fonts/SpaceMono-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
@@ -30,7 +51,7 @@
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
   --sidebar-width: 320px;
   --toolbar-height: 48px;
-  --timeline-height: 200px;
+  --timeline-height: 270px;
 }
 
 html, body, #app {

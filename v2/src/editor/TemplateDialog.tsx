@@ -1,18 +1,40 @@
-import { useCallback } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { TEMPLATES } from '../templates/index.ts';
 import { loadProject } from '../core/state.ts';
 import type { Template } from '../templates/index.ts';
+import { listLibraryItems, type LibraryItem } from '../core/persistence.ts';
+import { bundledLibraryId, openLibraryItem } from '../core/library.ts';
 
 interface TemplateDialogProps {
   onClose: () => void;
 }
 
 export function TemplateDialog({ onClose }: TemplateDialogProps) {
-  const handleSelect = useCallback((template: Template) => {
-    const proj = template.factory();
-    loadProject(proj);
-    onClose();
-  }, [onClose]);
+  const [saved, setSaved] = useState<LibraryItem[]>([]);
+  const [error, setError] = useState('');
+  const [opening, setOpening] = useState(false);
+  useEffect(() => {
+    let active = true;
+    listLibraryItems('template').then(items => { if (active) setSaved(items); })
+      .catch(cause => { if (active) setError(`Could not load templates: ${cause instanceof Error ? cause.message : String(cause)}`); });
+    return () => { active = false; };
+  }, []);
+
+  async function handleSelect(template: Template | null, item?: LibraryItem) {
+    setOpening(true);
+    setError('');
+    try {
+      const proj = item ? await openLibraryItem(item) : template!.factory();
+      loadProject(proj, item
+        ? { kind: 'template', id: item.id, name: item.name }
+        : { kind: 'template', id: bundledLibraryId('template', template!.id), name: template!.name });
+      onClose();
+    } catch (cause) {
+      setError(`Could not open template: ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setOpening(false);
+    }
+  }
 
   const categories = [...new Set(TEMPLATES.map(t => t.category))];
 
@@ -24,20 +46,34 @@ export function TemplateDialog({ onClose }: TemplateDialogProps) {
           <button class="template-close" onClick={onClose}>X</button>
         </div>
         <div class="template-body">
+          {error && <p class="template-error" role="alert">{error}</p>}
+          {saved.some(item => !item.id.startsWith('template:bundled:')) && <div class="template-category">
+            <h4 class="template-category-label">Saved templates</h4>
+            <div class="template-grid">
+              {saved.filter(item => !item.id.startsWith('template:bundled:')).map(item => <button key={item.id} class="template-card" disabled={opening} onClick={() => void handleSelect(null, item)}>
+                {item.thumbnail && <div class="template-card-preview"><img src={item.thumbnail} alt="" /></div>}
+                <div class="template-card-name">{item.name}</div><div class="template-card-desc">Saved in this browser</div>
+              </button>)}
+            </div>
+          </div>}
           {categories.map(cat => (
             <div key={cat} class="template-category">
               <h4 class="template-category-label">{cat}</h4>
               <div class="template-grid">
-                {TEMPLATES.filter(t => t.category === cat).map(t => (
+                {TEMPLATES.filter(t => t.category === cat).map(t => {
+                  const item = saved.find(savedItem => savedItem.id === bundledLibraryId('template', t.id));
+                  return (
                   <button
                     key={t.id}
                     class="template-card"
-                    onClick={() => handleSelect(t)}
+                    disabled={opening}
+                    onClick={() => void handleSelect(t, item)}
                   >
-                    <div class="template-card-name">{t.name}</div>
-                    <div class="template-card-desc">{t.description}</div>
+                    {(item?.thumbnail || t.preview) && <div class="template-card-preview"><img src={item?.thumbnail || t.preview} alt="" /></div>}
+                    <div class="template-card-name">{item?.name || t.name}{item ? ' · Saved' : ''}</div>
+                    <div class="template-card-desc">{item ? 'Updated in this browser' : t.description}</div>
                   </button>
-                ))}
+                ); })}
               </div>
             </div>
           ))}
@@ -103,6 +139,8 @@ const templateStyles = `
   padding: 20px;
   overflow-y: auto;
 }
+.template-error { color: #ff8b8b; font-size: 12px; }
+.template-card:disabled { opacity: .6; }
 
 .template-category {
   margin-bottom: 20px;
@@ -143,6 +181,9 @@ const templateStyles = `
   color: var(--text-primary);
   margin-bottom: 4px;
 }
+
+.template-card-preview { height: 110px; border-radius: 4px; overflow: hidden; margin-bottom: 10px; background: #0B0714; }
+.template-card-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
 
 .template-card-desc {
   font-size: 11px;

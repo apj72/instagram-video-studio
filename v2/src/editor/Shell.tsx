@@ -1,28 +1,40 @@
 import { useRef, useEffect, useCallback, useState } from 'preact/hooks';
-import { project, currentTime, isPlaying } from '../core/state.ts';
+import { project, currentTime, isPlaying, showLabels, selectedLayerId } from '../core/state.ts';
 import { createPreviewClock } from '../core/clock.ts';
-import { renderFrame } from '../render/engine.ts';
+import { renderFrame, renderLabels } from '../render/engine.ts';
 import { importV1Config } from '../core/migration.ts';
 import { loadProject } from '../core/state.ts';
-import { playAudio, stopAudio, seekAudio, getAudioRenderData, audioLoaded } from '../audio/analyser.ts';
+import { playAudio, stopAudio, seekAudio, getAudioRenderData, audioLoaded, audioLoadError, clearAudio, getLoadedAudioAssetId, loadAudioFile, setVolume } from '../audio/analyser.ts';
 import { initKeyboardShortcuts } from '../core/commands.ts';
-import { saveProject, startAutosave, stopAutosave } from '../core/persistence.ts';
+import { startAutosave, stopAutosave, loadAsset } from '../core/persistence.ts';
 import { generateId } from '../core/schema.ts';
 import { Toolbar } from './toolbar/Toolbar.tsx';
-import { Sidebar } from './sidebar/Sidebar.tsx';
+import { Sidebar, Inspector } from './sidebar/Sidebar.tsx';
 import { TimelinePanel } from './timeline/TimelinePanel.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
 import { TemplateDialog } from './TemplateDialog.tsx';
+import { ConfigManager } from './ConfigManager.tsx';
+import { PostsDialog } from './PostsDialog.tsx';
+import { SaveLibraryDialog } from './SaveLibraryDialog.tsx';
 import { CanvasViewport } from './canvas/CanvasViewport.tsx';
+import { getAssetMap, registerAsset } from '../core/assets.ts';
+import { TONY_BRAND_ASSETS } from '../templates/tonyBrand.ts';
 
 const previewClock = createPreviewClock(16000);
 
+const SPEED_OPTIONS = [0.25, 0.5, 1, 2] as const;
+
 export function Shell() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const assetsRef = useRef<Map<string, HTMLImageElement | HTMLVideoElement>>(new Map());
   const rafRef = useRef(0);
+  const lastPreviewTimeRef = useRef(0);
   const [showExport, setShowExport] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showConfigs, setShowConfigs] = useState(false);
+  const [showPosts, setShowPosts] = useState(false);
+  const [showSave, setShowSave] = useState(false);
+  const [looping, setLooping] = useState(false);
+  const [speed, setSpeed] = useState(1);
 
   const projectIdRef = useRef(generateId());
 
@@ -30,9 +42,19 @@ export function Shell() {
     const logo = new Image();
     logo.src = '/assets/logo_transparent.png';
     logo.onload = () => {
-      assetsRef.current.set('default-logo', logo);
+      registerAsset('default-logo', logo);
       drawFrame(0);
     };
+    for (const asset of TONY_BRAND_ASSETS) {
+      const image = new Image();
+      image.onload = () => { registerAsset(asset.id, image); drawFrame(currentTime.value); };
+      image.src = asset.url;
+    }
+    void Promise.all([
+      document.fonts.load('48px Bungee'),
+      document.fonts.load('48px "Permanent Marker"'),
+      document.fonts.load('bold 24px "Space Mono"'),
+    ]).then(() => drawFrame(currentTime.value));
     initKeyboardShortcuts();
     startAutosave(() => project.value);
 
@@ -42,9 +64,48 @@ export function Shell() {
         e.preventDefault();
         isPlaying.value = !isPlaying.value;
       }
+      if (selectedLayerId.value && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;
+      if (e.key === 'ArrowLeft' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        const frameDur = 1000 / project.value.settings.fps;
+        const t = Math.max(0, currentTime.value - frameDur);
+        isPlaying.value = false;
+        currentTime.value = t;
+        previewClock.seek(t);
+        drawFrame(t);
+      }
+      if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        const frameDur = 1000 / project.value.settings.fps;
+        const t = Math.min(project.value.settings.duration, currentTime.value + frameDur);
+        isPlaying.value = false;
+        currentTime.value = t;
+        previewClock.seek(t);
+        drawFrame(t);
+      }
+      if (e.key === 'Home' || (e.key === 'ArrowLeft' && (e.metaKey || e.ctrlKey))) {
+        e.preventDefault();
+        isPlaying.value = false;
+        currentTime.value = 0;
+        previewClock.seek(0);
+        drawFrame(0);
+      }
+      if (e.key === 'End' || (e.key === 'ArrowRight' && (e.metaKey || e.ctrlKey))) {
+        e.preventDefault();
+        isPlaying.value = false;
+        const dur = project.value.settings.duration;
+        currentTime.value = dur;
+        previewClock.seek(dur);
+        drawFrame(dur);
+      }
+      if (e.key === 'l' || e.key === 'L') {
+        e.preventDefault();
+        previewClock.setLoop(!previewClock.loop);
+        setLooping(previewClock.loop);
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
-        saveProject(projectIdRef.current, project.value);
+        setShowSave(true);
       }
     };
     document.addEventListener('keydown', handleGlobalKeys);
@@ -58,16 +119,58 @@ export function Shell() {
   const drawFrame = useCallback((timeMs: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { colorSpace: 'display-p3' });
     if (!ctx) return;
     const p = project.value;
     const frameNumber = Math.floor(timeMs / (1000 / p.settings.fps));
     const audioData = audioLoaded.value ? getAudioRenderData() : null;
-    renderFrame(p, ctx, timeMs, frameNumber, assetsRef.current, audioData);
+    renderFrame(p, ctx, timeMs, frameNumber, getAssetMap(), audioData);
+    if (showLabels.value) renderLabels(p, ctx, timeMs);
   }, []);
 
   useEffect(() => {
+    const { backgroundImageAssetId, backgroundImageDataUrl } = project.value.settings;
+    if (!backgroundImageAssetId || !backgroundImageDataUrl) return;
+    const existing = getAssetMap().get(backgroundImageAssetId);
+    if (existing instanceof HTMLImageElement && existing.src === backgroundImageDataUrl) return;
+    let active = true;
+    const image = new Image();
+    image.onload = () => {
+      if (active) {
+        registerAsset(backgroundImageAssetId, image);
+        drawFrame(currentTime.value);
+      }
+    };
+    image.src = backgroundImageDataUrl;
+    return () => { active = false; };
+  }, [project.value.settings.backgroundImageAssetId, project.value.settings.backgroundImageDataUrl, drawFrame]);
+
+  useEffect(() => {
+    const assetId = project.value.audio.assetId;
+    if (!assetId) { clearAudio(); return; }
+    if (getLoadedAudioAssetId() === assetId) return;
+    let active = true;
+    clearAudio();
+    void loadAsset(assetId).then(async blob => {
+      if (!active || project.value.audio.assetId !== assetId) return;
+      if (!blob) throw new Error('The audio file for this project was not found. Choose it again in Audio.');
+      const file = new File([blob], project.value.audio.name || 'project-audio.flac', { type: blob.type });
+      await loadAudioFile(file, assetId);
+      if (active && project.value.audio.assetId === assetId) setVolume(project.value.audio.muted ? 0 : project.value.audio.volume);
+    }).catch(cause => {
+      if (active) audioLoadError.value = cause instanceof Error ? cause.message : String(cause);
+    });
+    return () => { active = false; };
+  }, [project.value.audio.assetId]);
+
+  useEffect(() => {
+    if (audioLoaded.value) setVolume(project.value.audio.muted ? 0 : project.value.audio.volume);
+  }, [audioLoaded.value, project.value.audio.muted, project.value.audio.volume]);
+
+  useEffect(() => {
     previewClock.onTick = (timeMs: number) => {
+      if (timeMs < lastPreviewTimeRef.current && isPlaying.value && audioLoaded.value) playAudio(0);
+      lastPreviewTimeRef.current = timeMs;
       currentTime.value = timeMs;
       drawFrame(timeMs);
     };
@@ -99,9 +202,17 @@ export function Shell() {
   useEffect(() => {
     const dur = project.value.settings.duration;
     if (dur !== previewClock.duration) {
+      previewClock.setDuration(dur);
       previewClock.seek(0);
     }
   }, [project.value.settings.duration]);
+
+  useEffect(() => {
+    previewClock.onEnd = () => {
+      isPlaying.value = false;
+    };
+    return () => { previewClock.onEnd = null; };
+  }, []);
 
   const handleImportV1 = useCallback(async () => {
     try {
@@ -145,32 +256,86 @@ export function Shell() {
   }, []);
 
   const handleSeek = useCallback((timeMs: number) => {
+    lastPreviewTimeRef.current = timeMs;
     currentTime.value = timeMs;
     previewClock.seek(timeMs);
     if (audioLoaded.value) seekAudio(timeMs);
     drawFrame(timeMs);
   }, [drawFrame]);
 
-  const handleSave = useCallback(async () => {
-    await saveProject(projectIdRef.current, project.value);
+  const handleSkipToStart = useCallback(() => {
+    isPlaying.value = false;
+    handleSeek(0);
+  }, [handleSeek]);
+
+  const handleSkipToEnd = useCallback(() => {
+    isPlaying.value = false;
+    handleSeek(project.value.settings.duration);
+  }, [handleSeek]);
+
+  const handleFrameBack = useCallback(() => {
+    isPlaying.value = false;
+    const frameDur = 1000 / project.value.settings.fps;
+    handleSeek(Math.max(0, currentTime.value - frameDur));
+  }, [handleSeek]);
+
+  const handleFrameForward = useCallback(() => {
+    isPlaying.value = false;
+    const frameDur = 1000 / project.value.settings.fps;
+    handleSeek(Math.min(project.value.settings.duration, currentTime.value + frameDur));
+  }, [handleSeek]);
+
+  const handleToggleLoop = useCallback(() => {
+    setLooping(prev => {
+      const next = !prev;
+      previewClock.setLoop(next);
+      return next;
+    });
   }, []);
+
+  const handleSpeedChange = useCallback((newSpeed: number) => {
+    setSpeed(newSpeed);
+    previewClock.setRate(newSpeed);
+  }, []);
+
+  const handleSave = useCallback(() => setShowSave(true), []);
 
   const handleExport = useCallback(() => {
     isPlaying.value = false;
     setShowExport(true);
   }, []);
 
+  const handleCaptureImage = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${project.value.metadata.name.replace(/\s+/g, '_')}_frame.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  }, []);
+
   return (
     <div class="shell">
-      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} onNewFromTemplate={() => setShowTemplates(true)} />
+      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} onNewFromTemplate={() => setShowTemplates(true)} onCaptureImage={handleCaptureImage} onOpenConfigs={() => setShowConfigs(true)} onOpenPosts={() => setShowPosts(true)} />
       <div class="shell-main">
-        <Sidebar />
+        <Sidebar onSeek={handleSeek} />
         <div class="shell-canvas-area">
           <CanvasViewport canvasRef={canvasRef} />
           <div class="transport-bar">
-            <button class="transport-btn" onClick={handlePlayPause}>
-              {isPlaying.value ? '⏸' : '▶'}
-            </button>
+            <div class="transport-controls">
+              <button class="transport-btn" onClick={handleSkipToStart} title="Skip to start (Home)">⏮</button>
+              <button class="transport-btn" onClick={handleFrameBack} title="Frame back (←)">◀|</button>
+              <button class="transport-btn transport-btn-play" onClick={handlePlayPause} title="Play / Pause (Space)">
+                {isPlaying.value ? '⏸' : '▶'}
+              </button>
+              <button class="transport-btn" onClick={handleFrameForward} title="Frame forward (→)">|▶</button>
+              <button class="transport-btn" onClick={handleSkipToEnd} title="Skip to end (End)">⏭</button>
+            </div>
             <span class="transport-time">
               {formatTime(currentTime.value)} / {formatTime(project.value.settings.duration)}
             </span>
@@ -183,19 +348,40 @@ export function Shell() {
               value={currentTime.value}
               onInput={(e) => handleSeek(parseInt((e.target as HTMLInputElement).value))}
             />
+            <button
+              class={`transport-btn transport-btn-toggle ${looping ? 'transport-btn-active' : ''}`}
+              onClick={handleToggleLoop}
+              title="Loop playback (L)"
+            >↻</button>
+            <select
+              class="transport-speed"
+              value={speed}
+              onChange={(e) => handleSpeedChange(parseFloat((e.target as HTMLSelectElement).value))}
+              title="Playback speed"
+            >
+              {SPEED_OPTIONS.map(s => (
+                <option key={s} value={s}>{s === 1 ? '1x' : `${s}x`}</option>
+              ))}
+            </select>
           </div>
         </div>
+        <Inspector />
       </div>
       <TimelinePanel onSeek={handleSeek} />
       {showExport && (
         <ExportDialog
-          assets={assetsRef.current}
+          assets={getAssetMap()}
           onClose={() => setShowExport(false)}
         />
       )}
       {showTemplates && (
         <TemplateDialog onClose={() => setShowTemplates(false)} />
       )}
+      {showConfigs && (
+        <ConfigManager canvasRef={canvasRef} onClose={() => setShowConfigs(false)} />
+      )}
+      {showPosts && <PostsDialog onClose={() => setShowPosts(false)} />}
+      {showSave && <SaveLibraryDialog projectId={projectIdRef.current} onClose={() => setShowSave(false)} />}
       <style>{shellStyles}</style>
     </div>
   );
@@ -234,34 +420,75 @@ const shellStyles = `
 .transport-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
+  gap: 8px;
+  padding: 6px 16px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
 }
 
+.transport-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .transport-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--bg-elevated);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 11px;
   transition: background 0.15s;
+  flex-shrink: 0;
 }
-.transport-btn:hover { background: var(--accent); }
+.transport-btn:hover { background: var(--border-hover); }
+
+.transport-btn-play {
+  width: 34px;
+  height: 34px;
+  font-size: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+}
+.transport-btn-play:hover { background: var(--accent-hover); }
+
+.transport-btn-toggle {
+  font-size: 14px;
+}
+
+.transport-btn-active {
+  background: var(--accent) !important;
+  color: white !important;
+}
 
 .transport-time {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-secondary);
   min-width: 100px;
+  white-space: nowrap;
 }
 
 .transport-scrubber {
   flex: 1;
+  min-width: 60px;
 }
+
+.transport-speed {
+  padding: 4px 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.transport-speed:hover { border-color: var(--border-hover); }
 `;

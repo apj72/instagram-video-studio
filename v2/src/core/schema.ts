@@ -79,6 +79,15 @@ export interface TextLayer extends BaseLayer {
   shadow: { enabled: boolean; color: string; blur: number; offsetX: number; offsetY: number };
   background: { enabled: boolean; color: string; opacity: number; paddingX: number; paddingY: number; cornerRadius: number };
   border: { enabled: boolean; color: string; width: number; cornerRadius: number; paddingX: number; paddingY: number };
+  headlineEffect?: {
+    mode: 'outline' | 'stacked';
+    outlineColor: string;
+    outlineWidth: number;
+    offset: number;
+    midColor: string;
+    backColor: string;
+  };
+  typewriter?: { enabled: boolean; speed: number; cursor: boolean; cursorChar: string };
 }
 
 export interface VideoLayer extends BaseLayer {
@@ -108,6 +117,7 @@ export interface ShapeLayer extends BaseLayer {
 }
 
 export type EffectType =
+  | 'laser-beams'
   | 'glitch'
   | 'scanlines'
   | 'grid'
@@ -117,7 +127,15 @@ export type EffectType =
   | 'particles'
   | 'spectrum'
   | 'waveform'
-  | 'pulsing-logo';
+  | 'pulsing-logo'
+  | 'strobe'
+  | 'film-grain'
+  | 'chromatic-aberration'
+  | 'color-grading'
+  | 'zoom-pulse'
+  | 'blur-transition'
+  | 'parallax-drift'
+  | 'mirror';
 
 export interface EffectLayer extends BaseLayer {
   type: 'effect';
@@ -136,6 +154,13 @@ export interface BackgroundLogoLayer extends BaseLayer {
 export interface GroupLayer extends BaseLayer {
   type: 'group';
   children: string[];
+  entrance?: {
+    direction: 'none' | 'left' | 'right' | 'top' | 'bottom';
+    startTime: number;
+    duration: number;
+    stagger: number;
+    alternate: boolean;
+  };
 }
 
 export type Layer =
@@ -151,6 +176,9 @@ export type Layer =
 
 export interface AudioTrack {
   assetId: string | null;
+  name?: string;
+  /** Timeline duration before this audio changed the project length; enables later event scaling. */
+  timelineBaseDuration?: number;
   volume: number;
   muted: boolean;
   fadeInDuration: number;
@@ -181,6 +209,15 @@ export interface ProjectMetadata {
   schemaVersion: number;
 }
 
+export interface FrameBorder {
+  enabled: boolean;
+  thickness: number;
+  color: string;
+  cornerRadius: number;
+  inset: number;
+  outerBlur: number;
+}
+
 export interface ProjectSettings {
   width: number;
   height: number;
@@ -190,7 +227,17 @@ export interface ProjectSettings {
   beatOffset: number;
   backgroundColor: string;
   backgroundImageAssetId: string | null;
+  /** Self-contained cropped background; travels with exported project JSON. */
+  backgroundImageDataUrl?: string;
+  backgroundImageName?: string;
+  /** Moves the background photo onto the canvas; the background colour stays fixed. */
+  backgroundMotion?: {
+    direction: 'none' | 'top' | 'bottom' | 'left' | 'right';
+    startTime: number;
+    duration: number;
+  };
   seed: number;
+  border: FrameBorder;
 }
 
 export interface SafeArea {
@@ -262,7 +309,9 @@ export function createDefaultProject(): Project {
       beatOffset: 0,
       backgroundColor: '#000000',
       backgroundImageAssetId: null,
+      backgroundMotion: { direction: 'none', startTime: 0, duration: 1000 },
       seed: 42,
+      border: { enabled: false, thickness: 4, color: '#E8423F', cornerRadius: 0, inset: 40, outerBlur: 0 },
     },
     layers: [
       {

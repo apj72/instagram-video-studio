@@ -1,9 +1,17 @@
-import { project, selectedLayerId, selectedLayer, updateLayer, removeLayer, reorderLayers } from '../../core/state.ts';
-import type { Layer } from '../../core/schema.ts';
+import { useEffect, useState } from 'preact/hooks';
+import { project, selectedLayerId, selectedLayerIds, selectedLayer, updateLayer, removeLayer, reorderLayers, isPlaying, groupSelectedLayers, ungroupLayer } from '../../core/state.ts';
+import type { Layer, ImageLayer, TextLayer, EffectLayer, ShapeLayer, VideoLayer, BackgroundLogoLayer, GroupLayer } from '../../core/schema.ts';
+import { getGroupForLayer } from '../../core/groups.ts';
+import { evaluateProperty } from '../../timeline/interpolation.ts';
+import { currentTime, autoKeyframe } from '../../core/state.ts';
 import { AudioPanel } from './AudioPanel.tsx';
 import { SettingsPanel } from './SettingsPanel.tsx';
 import { AddLayerPanel } from './AddLayerPanel.tsx';
 import { MotionPanel } from './MotionPanel.tsx';
+import { PresetPanel } from './PresetPanel.tsx';
+import { loadImageAsset, loadVideoAsset } from '../../core/assets.ts';
+import { getFirstVisibleTime } from '../../timeline/events.ts';
+import { DEFAULT_LASER_COLORS, DEFAULT_LASER_SPEED, DEFAULT_LASER_SWEEP, getDefaultLaserAngle, getLaserOrigin, setLaserOrigin } from '../../render/laserMotion.ts';
 
 const LAYER_TYPE_ICONS: Record<string, string> = {
   'image': 'IMG',
@@ -15,40 +23,124 @@ const LAYER_TYPE_ICONS: Record<string, string> = {
   'group': 'GRP',
 };
 
-export function Sidebar() {
+const FONT_FAMILIES = [
+  'Bungee',
+  'Permanent Marker',
+  'Space Mono',
+  '"Bungee", sans-serif',
+  '"Permanent Marker", cursive',
+  '"Space Mono", monospace',
+  '"Arial Black", sans-serif',
+  '"Impact", sans-serif',
+  '"Bebas Neue", sans-serif',
+  '"Oswald", sans-serif',
+  '"Montserrat", sans-serif',
+  '"Roboto Condensed", sans-serif',
+];
+
+const CLOCK_DIRECTIONS: Record<number, string> = {
+  12: '12 (Up)',
+  1: '1',
+  2: '2',
+  3: '3 (Right)',
+  4: '4',
+  5: '5',
+  6: '6 (Down)',
+  7: '7',
+  8: '8',
+  9: '9 (Left)',
+  10: '10',
+  11: '11',
+};
+
+export function Sidebar({ onSeek }: { onSeek: (timeMs: number) => void }) {
   const layers = project.value.layers;
-  const selected = selectedLayer.value;
+  const [open, setOpen] = useState<Record<string, boolean>>({ layers: true });
+  const toggle = (key: string) => setOpen(previous => ({ ...previous, [key]: !previous[key] }));
 
   return (
-    <div class="sidebar">
-      <SettingsPanel />
-      <AudioPanel />
-      <AddLayerPanel />
-      <MotionPanel />
-      <div class="sidebar-section">
-        <div class="sidebar-header">
-          <span>Layers</span>
+    <aside class="sidebar" aria-label="Layers and tools">
+      <div class="sidebar-tools">
+        <Rollup title="Add layers" open={Boolean(open.add)} onToggle={() => toggle('add')}><AddLayerPanel /></Rollup>
+        <Rollup title="Project" open={Boolean(open.project)} onToggle={() => toggle('project')}><SettingsPanel /></Rollup>
+        <Rollup title="Audio" open={Boolean(open.audio)} onToggle={() => toggle('audio')}><AudioPanel onSeek={onSeek} /></Rollup>
+        <Rollup title="Presets" open={Boolean(open.presets)} onToggle={() => toggle('presets')}><PresetPanel /></Rollup>
+        <Rollup title="Motion presets" open={Boolean(open.motion)} onToggle={() => toggle('motion')}><MotionPanel /></Rollup>
+      </div>
+      <div class="sidebar-layer-section">
+        <button class="rollup-header" aria-expanded={Boolean(open.layers)} onClick={() => toggle('layers')}>
+          <span><span class="rollup-chevron">{open.layers ? '▾' : '▸'}</span> Layers</span>
           <span class="sidebar-count">{layers.length}</span>
-        </div>
-        <div class="layer-list">
+        </button>
+        {open.layers && <div class="layer-list">
+          <div class="layer-selection-toolbar">
+            <span>{selectedLayerIds.value.length ? `${selectedLayerIds.value.length} selected` : 'Select layers to group'}</span>
+            <button type="button" disabled={selectedLayerIds.value.length < 2} onClick={() => groupSelectedLayers()}>Group</button>
+          </div>
           {layers.map((layer, index) => (
             <div
               key={layer.id}
-              class={`layer-item ${selectedLayerId.value === layer.id ? 'layer-item-selected' : ''}`}
-              onClick={() => { selectedLayerId.value = layer.id; }}
+              class={`layer-item ${selectedLayerId.value === layer.id || selectedLayerIds.value.includes(layer.id) ? 'layer-item-selected' : ''} ${layer.visible ? '' : 'layer-item-hidden'} ${getGroupForLayer(layers, layer.id) ? 'layer-item-member' : ''}`}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey) {
+                  if (layer.type !== 'group' && !getGroupForLayer(layers, layer.id)) {
+                    selectedLayerIds.value = selectedLayerIds.value.includes(layer.id)
+                      ? selectedLayerIds.value.filter(id => id !== layer.id)
+                      : [...selectedLayerIds.value, layer.id];
+                  }
+                  return;
+                }
+                isPlaying.value = false;
+                selectedLayerIds.value = [];
+                selectedLayerId.value = layer.id;
+                const firstVisible = getFirstVisibleTime(layer, project.value.settings.duration);
+                onSeek(layer.type === 'group' && layer.entrance && layer.entrance.direction !== 'none'
+                  ? Math.min(project.value.settings.duration, Math.max(firstVisible, layer.entrance.startTime + Math.min(100, layer.entrance.duration * 0.2)))
+                  : firstVisible);
+              }}
             >
+              <input type="checkbox" class="layer-multi-check" aria-label={`Select ${layer.name} for group`}
+                checked={selectedLayerIds.value.includes(layer.id)} disabled={layer.type === 'group' || Boolean(getGroupForLayer(layers, layer.id))}
+                onClick={(e) => e.stopPropagation()}
+                onChange={() => {
+                  selectedLayerIds.value = selectedLayerIds.value.includes(layer.id)
+                    ? selectedLayerIds.value.filter(id => id !== layer.id)
+                    : [...selectedLayerIds.value, layer.id];
+                }} />
               <span class="layer-type-badge">{LAYER_TYPE_ICONS[layer.type] ?? '?'}</span>
               <span class="layer-name">{layer.name}</span>
+              {layer.type === 'group' && <span class="layer-group-count">{layer.children.length}</span>}
+              <button
+                type="button"
+                class={`layer-visibility-btn ${layer.visible ? '' : 'layer-visibility-off'}`}
+                title={`${layer.visible ? 'Hide' : 'Show'} ${layer.name}`}
+                aria-label={`${layer.visible ? 'Hide' : 'Show'} ${layer.name}`}
+                aria-pressed={layer.visible}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  updateLayer(layer.id, l => ({ ...l, visible: !l.visible }));
+                }}
+              >
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  {layer.visible ? <>
+                    <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </> : <>
+                    <path d="M3 3 21 21M10.6 6.1A11.7 11.7 0 0 1 12 6c6.4 0 10 6 10 6a17 17 0 0 1-3.2 3.7M6.2 6.7C3.5 8.5 2 12 2 12s3.6 6 10 6c1.5 0 2.9-.3 4.1-.9" />
+                    <path d="M10 10a3 3 0 0 0 4 4" />
+                  </>}
+                </svg>
+              </button>
               <div class="layer-actions">
                 <button
                   class="layer-action-btn"
-                  title={layer.visible ? 'Hide' : 'Show'}
+                  title={layer.locked ? 'Unlock' : 'Lock'}
                   onClick={(e) => {
                     e.stopPropagation();
-                    updateLayer(layer.id, l => ({ ...l, visible: !l.visible }));
+                    updateLayer(layer.id, l => ({ ...l, locked: !l.locked }));
                   }}
                 >
-                  {layer.visible ? 'V' : '-'}
+                  {layer.locked ? 'L' : 'U'}
                 </button>
                 {index > 0 && (
                   <button
@@ -74,119 +166,1220 @@ export function Sidebar() {
             </div>
           ))}
           {layers.length === 0 && (
-            <div class="layer-list-empty">No layers. Import a V1 config to get started.</div>
+            <div class="layer-list-empty">No layers. Use Templates, Import V1, or Add Layer above.</div>
           )}
-        </div>
+        </div>}
       </div>
+      <style>{sidebarStyles}</style>
+    </aside>
+  );
+}
 
-      {selected && (
-        <div class="sidebar-section">
-          <div class="sidebar-header">
-            <span>Properties</span>
-          </div>
-          <div class="property-panel">
-            <PropertyRow label="Name">
-              <input
-                type="text"
-                value={selected.name}
-                onInput={(e) => updateLayer(selected.id, l => ({ ...l, name: (e.target as HTMLInputElement).value }))}
-              />
-            </PropertyRow>
-            <PropertyRow label="Type">
-              <span class="prop-value-readonly">{selected.type}</span>
-            </PropertyRow>
-            <PropertyRow label="Visible">
-              <input
-                type="checkbox"
-                checked={selected.visible}
-                onChange={() => updateLayer(selected.id, l => ({ ...l, visible: !l.visible }))}
-              />
-            </PropertyRow>
-            <PropertyRow label="Blend">
-              <select
-                value={selected.blendMode}
-                onChange={(e) => updateLayer(selected.id, l => ({ ...l, blendMode: (e.target as HTMLSelectElement).value }))}
-              >
-                <option value="source-over">Normal</option>
-                <option value="multiply">Multiply</option>
-                <option value="screen">Screen</option>
-                <option value="overlay">Overlay</option>
-                <option value="lighten">Lighten</option>
-                <option value="darken">Darken</option>
-              </select>
-            </PropertyRow>
+function Rollup({ title, open, onToggle, children }: { title: string; open: boolean; onToggle: () => void; children: any }) {
+  return (
+    <section class="rollup-section">
+      <button class="rollup-header" aria-expanded={open} onClick={onToggle}>
+        <span><span class="rollup-chevron">{open ? '▾' : '▸'}</span> {title}</span>
+      </button>
+      {open && <div class="rollup-content">{children}</div>}
+    </section>
+  );
+}
 
+export function Inspector() {
+  const selected = selectedLayer.value;
+  return (
+    <aside class="inspector" aria-label="Properties">
+      <div class="inspector-header">
+        <strong>Properties</strong>
+        {selected && <span title={selected.name}>{selected.name}</span>}
+      </div>
+      {selected ? (
+        <div class="inspector-scroll" key={selected.id}>
+          {selected.type === 'effect' && (
+            <div class="inspector-note">Full-frame effect. Adjust its settings here; it has no draggable canvas box.</div>
+          )}
+          <details class="inspector-group" open>
+            <summary>{selected.type === 'effect' ? 'Layer and timing' : 'Timing and transform'}</summary>
+            <div class="property-panel">
+            <CommonProperties layer={selected} />
+            </div>
+          </details>
+
+          <details class="inspector-group" open>
+            <summary>{selected.type === 'text' ? 'Text and style' : `${selected.type} settings`}</summary>
+            <div class="property-panel">
+            {selected.type === 'image' && <ImageProperties layer={selected} />}
             {selected.type === 'text' && <TextProperties layer={selected} />}
             {selected.type === 'effect' && <EffectProperties layer={selected} />}
+            {selected.type === 'shape' && <ShapeProperties layer={selected} />}
+            {selected.type === 'video' && <VideoProperties layer={selected} />}
+            {selected.type === 'background-logo' && <BgLogoProperties layer={selected} />}
+            {selected.type === 'group' && <GroupProperties layer={selected} />}
+            </div>
+          </details>
 
+          <div class="property-panel">
             <div class="property-danger-zone">
               <button
                 class="danger-btn"
-                onClick={() => removeLayer(selected.id)}
+                onClick={() => selected.type === 'group' ? ungroupLayer(selected.id) : removeLayer(selected.id)}
               >
-                Delete Layer
+                {selected.type === 'group' ? 'Ungroup (keep layers)' : 'Delete Layer'}
               </button>
             </div>
           </div>
         </div>
-      )}
-      <style>{sidebarStyles}</style>
-    </div>
+      ) : <div class="inspector-empty">Select a layer to edit its settings. Effects are selected from the Layers list.</div>}
+    </aside>
   );
 }
 
-function PropertyRow({ label, children }: { label: string; children: any }) {
+function PropertyRow({ label, children, tooltip }: { label: string; children: any; tooltip?: string }) {
   return (
-    <div class="prop-row">
+    <div class="prop-row" title={tooltip}>
       <label class="prop-label">{label}</label>
       <div class="prop-control">{children}</div>
     </div>
   );
 }
 
-function TextProperties({ layer }: { layer: Layer & { type: 'text' } }) {
+function PropSubheading({ label }: { label: string }) {
+  return <div class="prop-subheading">{label}</div>;
+}
+
+function FontSizeControl({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(Math.round(value)));
+
+  useEffect(() => {
+    setDraft(String(Math.round(value)));
+  }, [value]);
+
+  const commit = (raw: string) => {
+    const entered = Number(raw);
+    if (!Number.isFinite(entered) || raw.trim() === '') {
+      setDraft(String(Math.round(value)));
+      return;
+    }
+    const next = Math.max(12, Math.min(300, Math.round(entered)));
+    setDraft(String(next));
+    if (next !== value) onChange(next);
+  };
+
   return (
     <>
-      <PropertyRow label="Text">
-        <textarea
-          value={layer.text}
-          rows={3}
-          onInput={(e) => updateLayer(layer.id, l => ({
-            ...l,
-            text: (e.target as HTMLTextAreaElement).value,
-          }))}
-        />
-      </PropertyRow>
-      <PropertyRow label="Font">
+      <input type="range" min="12" max="300" step="1" value={value}
+        aria-label="Font size slider"
+        onInput={(e) => onChange(Number((e.target as HTMLInputElement).value))} />
+      <input type="number" min="12" max="300" step="1" value={draft}
+        class="prop-font-size-input" aria-label="Font size in pixels"
+        onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+        onBlur={(e) => commit((e.target as HTMLInputElement).value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          if (e.key === 'Escape') {
+            const input = e.target as HTMLInputElement;
+            input.value = String(Math.round(value));
+            setDraft(input.value);
+            input.blur();
+          }
+        }} />
+      <span class="prop-unit">px</span>
+    </>
+  );
+}
+
+function LaserNumberInput({ value, min, max, label, onCommit }: { value: number; min: number; max: number; label: string; onCommit: (number: number) => void }) {
+  const [draft, setDraft] = useState(String(Math.round(value)));
+  useEffect(() => setDraft(String(Math.round(value))), [value]);
+
+  const commit = (raw: string) => {
+    const number = Number(raw);
+    if (raw.trim() === '' || !Number.isFinite(number)) {
+      setDraft(String(Math.round(value)));
+      return;
+    }
+    const next = Math.max(min, Math.min(max, Math.round(number)));
+    setDraft(String(next));
+    if (next !== value) onCommit(next);
+  };
+
+  return <input type="number" min={min} max={max} step="1" value={draft} aria-label={label}
+    onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+    onBlur={(e) => commit((e.target as HTMLInputElement).value)}
+    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />;
+}
+
+function setFirstKfValue(_layer: Layer, id: string, path: string[], value: number) {
+  const time = autoKeyframe.value ? currentTime.value : 0;
+  updateLayer(id, l => {
+    let obj = l as any;
+    for (let i = 0; i < path.length - 1; i++) obj = obj[path[i]];
+    const prop = obj[path[path.length - 1]];
+    let kfs = [...prop.keyframes];
+
+    if (autoKeyframe.value) {
+      const existingIdx = kfs.findIndex((k: any) => k.time === time);
+      if (existingIdx >= 0) {
+        kfs[existingIdx] = { ...kfs[existingIdx], value };
+      } else {
+        kfs.push({ time, value, easing: 'ease-out' as const });
+        kfs.sort((a: any, b: any) => a.time - b.time);
+      }
+    } else {
+      if (kfs.length > 0) {
+        kfs[0] = { ...kfs[0], value };
+      } else {
+        kfs.push({ time: 0, value, easing: 'linear' });
+      }
+    }
+
+    const newProp = { keyframes: kfs };
+    const result = { ...l } as any;
+    let target = result;
+    for (let i = 0; i < path.length - 1; i++) {
+      target[path[i]] = { ...target[path[i]] };
+      target = target[path[i]];
+    }
+    target[path[path.length - 1]] = newProp;
+    return result as Layer;
+  });
+}
+
+function CommonProperties({ layer }: { layer: Layer }) {
+  const t = currentTime.value;
+  const opacity = evaluateProperty(layer.opacity, t);
+  const posX = evaluateProperty(layer.position.x, t);
+  const posY = evaluateProperty(layer.position.y, t);
+  const scX = evaluateProperty(layer.scale.x, t);
+  const rot = evaluateProperty(layer.rotation, t);
+
+  return (
+    <>
+      <PropertyRow label="Name" tooltip="Display name for this layer">
         <input
           type="text"
-          value={layer.fontFamily}
-          onInput={(e) => updateLayer(layer.id, l => ({
-            ...l,
-            fontFamily: (e.target as HTMLInputElement).value,
-          }))}
+          value={layer.name}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, name: (e.target as HTMLInputElement).value }))}
         />
       </PropertyRow>
-      <PropertyRow label="Color">
+      <PropertyRow label="Type" tooltip="Layer type (read-only)">
+        <span class="prop-value-readonly">{layer.type}</span>
+      </PropertyRow>
+      <PropertyRow label="Visible" tooltip="Toggle layer visibility on canvas">
         <input
-          type="color"
-          value={layer.textColor}
-          onInput={(e) => updateLayer(layer.id, l => ({
-            ...l,
-            textColor: (e.target as HTMLInputElement).value,
-          }))}
+          type="checkbox"
+          checked={layer.visible}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, visible: !l.visible }))}
         />
       </PropertyRow>
-      <PropertyRow label="Align">
+      <PropertyRow label="Locked" tooltip="Lock layer to prevent accidental edits">
+        <input
+          type="checkbox"
+          checked={layer.locked}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, locked: !l.locked }))}
+        />
+      </PropertyRow>
+      <PropertyRow label="Blend" tooltip="Compositing blend mode for this layer">
         <select
-          value={layer.textAlign}
-          onChange={(e) => updateLayer(layer.id, l => ({
-            ...l,
-            textAlign: (e.target as HTMLSelectElement).value as 'left' | 'center' | 'right',
-          }))}
+          value={layer.blendMode}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, blendMode: (e.target as HTMLSelectElement).value }))}
         >
+          <option value="source-over">Normal</option>
+          <option value="multiply">Multiply</option>
+          <option value="screen">Screen</option>
+          <option value="overlay">Overlay</option>
+          <option value="lighten">Lighten</option>
+          <option value="darken">Darken</option>
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Opacity" tooltip="Layer transparency (0 = invisible, 1 = fully opaque)">
+        <input type="range" min="0" max="1" step="0.01" value={opacity}
+          onInput={(e) => setFirstKfValue(layer, layer.id, ['opacity'], parseFloat((e.target as HTMLInputElement).value))} />
+      </PropertyRow>
+      {layer.type !== 'effect' && <>
+      <PropertyRow label="Pos Y" tooltip="Vertical position (0 = top, 0.5 = center, 1 = bottom)">
+        <input type="range" min="0" max="1" step="0.01" value={posY}
+          onInput={(e) => setFirstKfValue(layer, layer.id, ['position', 'y'], parseFloat((e.target as HTMLInputElement).value))} />
+      </PropertyRow>
+      <PropertyRow label="Pos X" tooltip="Horizontal position (0 = left, 0.5 = center, 1 = right)">
+        <input type="range" min="0" max="1" step="0.01" value={posX}
+          onInput={(e) => setFirstKfValue(layer, layer.id, ['position', 'x'], parseFloat((e.target as HTMLInputElement).value))} />
+      </PropertyRow>
+      <PropertyRow label="Scale" tooltip="Uniform scale factor (1 = 100%)">
+        <input type="range" min="0" max="3" step="0.01" value={scX}
+          onInput={(e) => {
+            const v = parseFloat((e.target as HTMLInputElement).value);
+            setFirstKfValue(layer, layer.id, ['scale', 'x'], v);
+            setFirstKfValue(layer, layer.id, ['scale', 'y'], v);
+          }} />
+      </PropertyRow>
+      <PropertyRow label="Rotation" tooltip="Rotation (-1 = -360°, 0 = none, 1 = 360°). Animatable with keyframes.">
+        <input type="range" min="-1" max="1" step="0.01" value={rot}
+          onInput={(e) => setFirstKfValue(layer, layer.id, ['rotation'], parseFloat((e.target as HTMLInputElement).value))} />
+      </PropertyRow>
+      </>}
+      <PropertyRow label="In Time" tooltip="Time when this layer becomes visible (milliseconds)">
+        <input type="number" min="0" step="100" value={layer.inTime}
+          class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, inTime: parseInt((e.target as HTMLInputElement).value) || 0 }))} />
+        <span class="prop-unit">ms</span>
+      </PropertyRow>
+      <PropertyRow label="Out Time" tooltip="Time when this layer disappears (milliseconds)">
+        <input type="number" min="0" step="100" value={layer.outTime}
+          class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, outTime: parseInt((e.target as HTMLInputElement).value) || 0 }))} />
+        <span class="prop-unit">ms</span>
+      </PropertyRow>
+    </>
+  );
+}
+
+function GroupProperties({ layer }: { layer: GroupLayer }) {
+  const entrance = layer.entrance ?? { direction: 'none' as const, startTime: 0, duration: 600, stagger: 180, alternate: false };
+  const setEntrance = (change: Partial<typeof entrance>) => updateLayer(layer.id, current => ({
+    ...current, entrance: { ...entrance, ...change },
+  } as GroupLayer));
+  const memberNames = layer.children.map(id => project.value.layers.find(child => child.id === id)?.name).filter(Boolean);
+  return <>
+    <div class="inspector-note">Move, scale, rotate, fade, and time these {layer.children.length} layers together. Drag a member on the canvas while this group is selected to move the group.</div>
+    <PropertyRow label="Members"><span class="prop-value-readonly">{memberNames.join(', ')}</span></PropertyRow>
+    <PropSubheading label="Staggered slide in" />
+    <PropertyRow label="Direction">
+      <select aria-label="Group slide direction" value={entrance.direction}
+        onChange={(e) => setEntrance({ direction: (e.target as HTMLSelectElement).value as typeof entrance.direction })}>
+        <option value="none">None</option>
+        <option value="left">From left</option>
+        <option value="right">From right</option>
+        <option value="top">From top</option>
+        <option value="bottom">From bottom</option>
+      </select>
+    </PropertyRow>
+    <PropertyRow label="Start" tooltip="When the first member starts entering">
+      <input type="number" min="0" step="100" value={entrance.startTime} aria-label="Group entrance start time"
+        onInput={(e) => setEntrance({ startTime: Math.max(0, Number((e.target as HTMLInputElement).value) || 0) })} />
+      <span class="prop-unit">ms</span>
+    </PropertyRow>
+    <PropertyRow label="Slide time" tooltip="Time each member takes to reach its visible position">
+      <input type="number" min="1" step="50" value={entrance.duration} aria-label="Group slide duration"
+        onInput={(e) => setEntrance({ duration: Math.max(1, Number((e.target as HTMLInputElement).value) || 1) })} />
+      <span class="prop-unit">ms</span>
+    </PropertyRow>
+    <PropertyRow label="Delay" tooltip="Time between successive members starting">
+      <input type="number" min="0" step="50" value={entrance.stagger} aria-label="Group stagger delay"
+        onInput={(e) => setEntrance({ stagger: Math.max(0, Number((e.target as HTMLInputElement).value) || 0) })} />
+      <span class="prop-unit">ms</span>
+    </PropertyRow>
+    <PropertyRow label="Alternate" tooltip="Alternate the chosen direction with its opposite">
+      <input type="checkbox" checked={entrance.alternate} aria-label="Alternate group slide direction"
+        onChange={() => setEntrance({ alternate: !entrance.alternate })} />
+    </PropertyRow>
+  </>;
+}
+
+function ImageProperties({ layer }: { layer: ImageLayer }) {
+  const handleImageUpload = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const assetId = `asset_${Date.now().toString(36)}`;
+      const img = await loadImageAsset(assetId, file);
+      updateLayer(layer.id, l => ({
+        ...l,
+        assetId,
+        size: { width: img.naturalWidth, height: img.naturalHeight },
+      }));
+    };
+    input.click();
+  };
+
+  return (
+    <>
+      <PropSubheading label="Image" />
+      <PropertyRow label="Image" tooltip="Upload or replace the image file for this layer">
+        <button class="prop-upload-btn" onClick={handleImageUpload}>
+          {layer.assetId ? 'Change Image' : 'Upload Image'}
+        </button>
+      </PropertyRow>
+      <PropSubheading label="Parallax" />
+      <PropertyRow label="Enabled" tooltip="Enable slow cinematic vertical pan effect">
+        <input type="checkbox" checked={layer.parallax}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, parallax: !(l as ImageLayer).parallax }) as Layer)} />
+      </PropertyRow>
+      {layer.parallax && (
+        <>
+          <PropertyRow label="Start Y" tooltip="Vertical start position for parallax drift (-1 = above frame)">
+            <input type="range" min="-1" max="0" step="0.01" value={layer.parallaxStartY}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, parallaxStartY: parseFloat((e.target as HTMLInputElement).value) }) as Layer)} />
+          </PropertyRow>
+          <PropertyRow label="Duration" tooltip="Time for the parallax transition in/out (ms)">
+            <input type="number" min="0" step="100" value={layer.parallaxDuration} class="prop-num-input"
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, parallaxDuration: parseInt((e.target as HTMLInputElement).value) || 0 }) as Layer)} />
+            <span class="prop-unit">ms</span>
+          </PropertyRow>
+        </>
+      )}
+    </>
+  );
+}
+
+function TextProperties({ layer }: { layer: TextLayer }) {
+  const t = currentTime.value;
+  const fontSize = evaluateProperty(layer.fontSize, t);
+
+  return (
+    <>
+      <PropSubheading label="Text" />
+      <PropertyRow label="Text" tooltip="Text content. Use \\n for line breaks.">
+        <textarea value={layer.text} rows={3}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, text: (e.target as HTMLTextAreaElement).value }))} />
+      </PropertyRow>
+      <PropertyRow label="Font" tooltip="Font family. Google Fonts loaded automatically.">
+        <select value={layer.fontFamily}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, fontFamily: (e.target as HTMLSelectElement).value }))}>
+          {FONT_FAMILIES.map(f => <option key={f} value={f}>{f.split(',')[0].replace(/"/g, '')}</option>)}
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Weight" tooltip="Font weight / boldness">
+        <select value={layer.fontWeight}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, fontWeight: (e.target as HTMLSelectElement).value }))}>
+          <option value="400">Normal</option>
+          <option value="bold">Bold</option>
+          <option value="900">Black</option>
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Size" tooltip="Font size in pixels. Animatable with keyframes.">
+        <FontSizeControl value={fontSize}
+          onChange={(size) => setFirstKfValue(layer, layer.id, ['fontSize'], size)} />
+      </PropertyRow>
+      <PropertyRow label="Color" tooltip="Text fill color">
+        <input type="color" value={layer.textColor}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, textColor: (e.target as HTMLInputElement).value }))} />
+      </PropertyRow>
+      <PropertyRow label="Align" tooltip="Horizontal text alignment">
+        <select value={layer.textAlign}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, textAlign: (e.target as HTMLSelectElement).value as 'left' | 'center' | 'right' }))}>
           <option value="left">Left</option>
           <option value="center">Center</option>
+          <option value="right">Right</option>
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Line H" tooltip="Line height multiplier (1.0 = tight, 1.5 = normal, 2+ = loose)">
+        <input type="range" min="0.8" max="3" step="0.1" value={layer.lineHeight}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, lineHeight: parseFloat((e.target as HTMLInputElement).value) }))} />
+        <span class="prop-unit">{layer.lineHeight.toFixed(1)}</span>
+      </PropertyRow>
+      <PropertyRow label="Spacing" tooltip="Letter spacing in pixels (negative = tighter)">
+        <input type="range" min="-5" max="20" step="0.5" value={layer.letterSpacing}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, letterSpacing: parseFloat((e.target as HTMLInputElement).value) }))} />
+      </PropertyRow>
+
+      <PropSubheading label="Headline Effect" />
+      <PropertyRow label="Style" tooltip="Brand outline or stacked orange and pink headline treatment">
+        <select value={layer.headlineEffect?.mode ?? 'none'}
+          onChange={(e) => {
+            const mode = (e.target as HTMLSelectElement).value;
+            updateLayer(layer.id, l => ({
+              ...l,
+              headlineEffect: mode === 'none' ? undefined : {
+                mode: mode as 'outline' | 'stacked',
+                outlineColor: '#000000', outlineWidth: 12, offset: 7,
+                midColor: '#FF7A1A', backColor: '#FF2E93',
+              },
+            }));
+          }}>
+          <option value="none">None</option>
+          <option value="outline">Black outline</option>
+          <option value="stacked">Stacked orange + pink</option>
+        </select>
+      </PropertyRow>
+      {layer.headlineEffect && (
+        <>
+          <PropertyRow label="Outline" tooltip="Headline outline colour">
+            <input type="color" value={layer.headlineEffect.outlineColor}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, outlineColor: (e.target as HTMLInputElement).value } }))} />
+          </PropertyRow>
+          <PropertyRow label="Stroke" tooltip="Headline outline width in pixels">
+            <input type="range" min="0" max="24" step="1" value={layer.headlineEffect.outlineWidth}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, outlineWidth: Number((e.target as HTMLInputElement).value) } }))} />
+            <span class="prop-unit">{layer.headlineEffect.outlineWidth}px</span>
+          </PropertyRow>
+          {layer.headlineEffect.mode === 'stacked' && (
+            <>
+              <PropertyRow label="Offset" tooltip="Distance between stacked headline colours">
+                <input type="range" min="0" max="24" step="1" value={layer.headlineEffect.offset}
+                  onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, offset: Number((e.target as HTMLInputElement).value) } }))} />
+                <span class="prop-unit">{layer.headlineEffect.offset}px</span>
+              </PropertyRow>
+              <PropertyRow label="Middle">
+                <input type="color" value={layer.headlineEffect.midColor}
+                  onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, midColor: (e.target as HTMLInputElement).value } }))} />
+              </PropertyRow>
+              <PropertyRow label="Back">
+                <input type="color" value={layer.headlineEffect.backColor}
+                  onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, backColor: (e.target as HTMLInputElement).value } }))} />
+              </PropertyRow>
+            </>
+          )}
+        </>
+      )}
+
+      <PropSubheading label="Stroke" />
+      <PropertyRow label="Enabled">
+        <input type="checkbox" checked={layer.stroke.enabled}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as TextLayer).stroke, enabled: !(l as TextLayer).stroke.enabled } }))} />
+      </PropertyRow>
+      {layer.stroke.enabled && (
+        <>
+          <PropertyRow label="Color">
+            <input type="color" value={layer.stroke.color}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as TextLayer).stroke, color: (e.target as HTMLInputElement).value } }))} />
+          </PropertyRow>
+          <PropertyRow label="Width">
+            <input type="range" min="1" max="10" step="1" value={layer.stroke.width}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as TextLayer).stroke, width: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+        </>
+      )}
+
+      <PropSubheading label="Shadow" />
+      <PropertyRow label="Enabled">
+        <input type="checkbox" checked={layer.shadow.enabled}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, enabled: !(l as TextLayer).shadow.enabled } }))} />
+      </PropertyRow>
+      {layer.shadow.enabled && (
+        <>
+          <PropertyRow label="Color">
+            <input type="color" value={layer.shadow.color}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, color: (e.target as HTMLInputElement).value } }))} />
+          </PropertyRow>
+          <PropertyRow label="Blur">
+            <input type="range" min="0" max="30" step="1" value={layer.shadow.blur}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, blur: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Offset Y">
+            <input type="range" min="-10" max="10" step="1" value={layer.shadow.offsetY}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, offsetY: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+        </>
+      )}
+
+      <PropSubheading label="Background" />
+      <PropertyRow label="Enabled">
+        <input type="checkbox" checked={layer.background.enabled}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, enabled: !(l as TextLayer).background.enabled } }))} />
+      </PropertyRow>
+      {layer.background.enabled && (
+        <>
+          <PropertyRow label="Color">
+            <input type="color" value={layer.background.color}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, color: (e.target as HTMLInputElement).value } }))} />
+          </PropertyRow>
+          <PropertyRow label="Opacity">
+            <input type="range" min="0" max="1" step="0.05" value={layer.background.opacity}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, opacity: parseFloat((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Pad X">
+            <input type="range" min="0" max="80" step="2" value={layer.background.paddingX}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, paddingX: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Pad Y">
+            <input type="range" min="0" max="40" step="2" value={layer.background.paddingY}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, paddingY: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Radius">
+            <input type="range" min="0" max="30" step="1" value={layer.background.cornerRadius}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, cornerRadius: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+        </>
+      )}
+
+      <PropSubheading label="Border" />
+      <PropertyRow label="Enabled">
+        <input type="checkbox" checked={layer.border.enabled}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, enabled: !(l as TextLayer).border.enabled } }))} />
+      </PropertyRow>
+      {layer.border.enabled && (
+        <>
+          <PropertyRow label="Color">
+            <input type="color" value={layer.border.color}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, color: (e.target as HTMLInputElement).value } }))} />
+          </PropertyRow>
+          <PropertyRow label="Width">
+            <input type="range" min="1" max="10" step="1" value={layer.border.width}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, width: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Radius">
+            <input type="range" min="0" max="30" step="1" value={layer.border.cornerRadius}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, cornerRadius: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Pad X">
+            <input type="range" min="0" max="80" step="2" value={layer.border.paddingX}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, paddingX: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+          <PropertyRow label="Pad Y">
+            <input type="range" min="0" max="40" step="2" value={layer.border.paddingY}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, paddingY: parseInt((e.target as HTMLInputElement).value) } }))} />
+          </PropertyRow>
+        </>
+      )}
+
+      <PropSubheading label="Typewriter" />
+      <PropertyRow label="Enabled" tooltip="Text types itself character by character">
+        <input type="checkbox" checked={layer.typewriter?.enabled ?? false}
+          onChange={() => {
+            const tw = layer.typewriter ?? { enabled: false, speed: 30, cursor: true, cursorChar: '|' };
+            updateLayer(layer.id, l => ({ ...l, typewriter: { ...tw, enabled: !tw.enabled } }));
+          }} />
+      </PropertyRow>
+      {layer.typewriter?.enabled && (
+        <>
+          <PropertyRow label="Speed" tooltip="Characters revealed per second">
+            <input type="range" min="5" max="100" step="5" value={layer.typewriter.speed}
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, typewriter: { ...(l as TextLayer).typewriter!, speed: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <span class="prop-unit">{layer.typewriter.speed} ch/s</span>
+          </PropertyRow>
+          <PropertyRow label="Cursor" tooltip="Show blinking cursor during typing">
+            <input type="checkbox" checked={layer.typewriter.cursor}
+              onChange={() => updateLayer(layer.id, l => ({ ...l, typewriter: { ...(l as TextLayer).typewriter!, cursor: !(l as TextLayer).typewriter!.cursor } }))} />
+          </PropertyRow>
+          <PropertyRow label="Char" tooltip="Cursor character">
+            <input type="text" value={layer.typewriter.cursorChar} style="width:30px;text-align:center"
+              onInput={(e) => updateLayer(layer.id, l => ({ ...l, typewriter: { ...(l as TextLayer).typewriter!, cursorChar: (e.target as HTMLInputElement).value || '|' } }))} />
+          </PropertyRow>
+        </>
+      )}
+    </>
+  );
+}
+
+function EffectProperties({ layer }: { layer: EffectLayer }) {
+  const cfg = layer.config as Record<string, any>;
+
+  const updateConfig = (key: string, value: unknown) => {
+    updateLayer(layer.id, l => ({
+      ...l,
+      config: { ...(l as EffectLayer).config, [key]: value },
+    }));
+  };
+
+  const updateLaserInsertionPoint = (index: number, axis: 'x' | 'y', percent: number) => {
+    if (!Number.isFinite(percent)) return;
+    updateLayer(layer.id, l => {
+      const config = (l as EffectLayer).config;
+      const count = Math.max(1, Math.min(3, Math.round(Number(config.count ?? 3))));
+      const origins = config.origins as { x: number; y: number }[] | undefined;
+      const point = getLaserOrigin(index, count, origins);
+      return { ...l, config: { ...config, origins: setLaserOrigin(origins, index, count, { ...point, [axis]: percent / 100 }) } };
+    });
+  };
+
+  const updateLaserAngle = (index: number, degrees: number) => {
+    if (!Number.isFinite(degrees)) return;
+    updateLayer(layer.id, l => {
+      const config = (l as EffectLayer).config;
+      const count = Math.max(1, Math.min(3, Math.round(Number(config.count ?? 3))));
+      const angles = Array.from({ length: count }, (_, beam) => Number((config.angles as number[] | undefined)?.[beam] ?? getDefaultLaserAngle(beam, count)));
+      angles[index] = Math.max(-180, Math.min(180, Math.round(degrees)));
+      return { ...l, config: { ...config, angles } };
+    });
+  };
+
+  return (
+    <>
+      <PropSubheading label={`Effect: ${layer.effectType}`} />
+
+      {layer.effectType === 'laser-beams' && (
+        <>
+          <PropertyRow label="Beams" tooltip="Use no more than three beams per the DJ Tony T guide">
+            <input type="range" min="0" max="3" step="1" value={cfg.count ?? 3}
+              onInput={(e) => updateConfig('count', Number((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.count ?? 3}</span>
+          </PropertyRow>
+          <PropertyRow label="Glow">
+            <input type="range" min="0" max="60" step="1" value={cfg.glow ?? 26}
+              onInput={(e) => updateConfig('glow', Number((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.glow ?? 26}px</span>
+          </PropertyRow>
+          <PropertyRow label="Speed" tooltip="How quickly the projector beams sweep across the screen. Zero holds them still.">
+            <input type="range" min="0" max="0.8" step="0.01" value={cfg.speed ?? DEFAULT_LASER_SPEED}
+              onInput={(e) => updateConfig('speed', Number((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{(cfg.speed ?? DEFAULT_LASER_SPEED).toFixed(2)}/s</span>
+          </PropertyRow>
+          <PropertyRow label="Sweep" tooltip="How far each beam swings to either side of its centre angle">
+            <input type="range" min="0" max="45" step="1" value={cfg.sweep ?? DEFAULT_LASER_SWEEP}
+              onInput={(e) => updateConfig('sweep', Number((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.sweep ?? DEFAULT_LASER_SWEEP}°</span>
+          </PropertyRow>
+          <div class="laser-origin-hint">Drag the numbered points on the canvas, or enter X and Y positions below.</div>
+          {Array.from({ length: Math.max(0, Math.min(3, cfg.count ?? 3)) }, (_, index) => {
+            const origin = getLaserOrigin(index, cfg.count ?? 3, cfg.origins);
+            const angle = cfg.angles?.[index] ?? getDefaultLaserAngle(index, cfg.count ?? 3);
+            return <div key={index} class="laser-beam-settings">
+              <PropertyRow label={`Beam ${index + 1}`} tooltip={`Colour of laser beam ${index + 1}`}>
+                <input type="color" aria-label={`Beam ${index + 1} colour`} value={cfg.colors?.[index] ?? DEFAULT_LASER_COLORS[index]}
+                  onInput={(e) => {
+                    const colors = [...(cfg.colors ?? DEFAULT_LASER_COLORS)];
+                    colors[index] = (e.target as HTMLInputElement).value;
+                    updateConfig('colors', colors);
+                  }} />
+                <span class="prop-unit">{cfg.colors?.[index] ?? DEFAULT_LASER_COLORS[index]}</span>
+              </PropertyRow>
+              <PropertyRow label={`Origin ${index + 1}`} tooltip="Beam insertion point as a percentage of the canvas width and height">
+                <div class="laser-origin-fields">
+                  <label>X <LaserNumberInput value={origin.x * 100} min={0} max={100} label={`Beam ${index + 1} origin X percent`}
+                    onCommit={(percent) => updateLaserInsertionPoint(index, 'x', percent)} />%</label>
+                  <label>Y <LaserNumberInput value={origin.y * 100} min={0} max={100} label={`Beam ${index + 1} origin Y percent`}
+                    onCommit={(percent) => updateLaserInsertionPoint(index, 'y', percent)} />%</label>
+                </div>
+              </PropertyRow>
+              <PropertyRow label={`Angle ${index + 1}`} tooltip="Starting direction: 0° is up, negative aims left, positive aims right. Sweep moves around this angle.">
+                <input type="range" min="-180" max="180" step="1" value={angle}
+                  aria-label={`Beam ${index + 1} insertion angle slider`}
+                  onInput={(e) => updateLaserAngle(index, Number((e.target as HTMLInputElement).value))} />
+                <LaserNumberInput value={angle} min={-180} max={180} label={`Beam ${index + 1} insertion angle degrees`}
+                  onCommit={(degrees) => updateLaserAngle(index, degrees)} />
+                <span class="prop-unit">°</span>
+              </PropertyRow>
+            </div>;
+          })}
+        </>
+      )}
+
+      {layer.effectType === 'spectrum' && (
+        <>
+          <PropertyRow label="Height">
+            <input type="range" min="200" max="1600" step="50" value={cfg.height ?? 900}
+              onInput={(e) => updateConfig('height', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.height ?? 900}px</span>
+          </PropertyRow>
+          <PropertyRow label="Offset">
+            <input type="range" min="0" max="200" step="5" value={cfg.bottomOffset ?? 40}
+              onInput={(e) => updateConfig('bottomOffset', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Bars">
+            <input type="range" min="8" max="64" step="4" value={cfg.barCount ?? 32}
+              onInput={(e) => updateConfig('barCount', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.barCount ?? 32}</span>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'waveform' && (
+        <>
+          <PropertyRow label="Y Center">
+            <input type="range" min="0.1" max="0.9" step="0.01" value={cfg.yCenter ?? 0.61}
+              onInput={(e) => updateConfig('yCenter', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Height">
+            <input type="range" min="200" max="1800" step="50" value={cfg.height ?? 1200}
+              onInput={(e) => updateConfig('height', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.height ?? 1200}px</span>
+          </PropertyRow>
+          <PropertyRow label="Line W">
+            <input type="range" min="1" max="12" step="1" value={cfg.lineWidth ?? 6}
+              onInput={(e) => updateConfig('lineWidth', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'pulsing-logo' && (
+        <>
+          <PropertyRow label="Max Scale">
+            <input type="range" min="1" max="4" step="0.1" value={cfg.maxScale ?? 2.0}
+              onInput={(e) => updateConfig('maxScale', parseFloat((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{(cfg.maxScale ?? 2.0).toFixed(1)}x</span>
+          </PropertyRow>
+          <PropertyRow label="Opacity">
+            <input type="range" min="0" max="1" step="0.05" value={cfg.opacity ?? 1}
+              onInput={(e) => updateConfig('opacity', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Start">
+            <input type="number" min="0" step="100" value={cfg.startTime ?? 0} class="prop-num-input"
+              onInput={(e) => updateConfig('startTime', parseInt((e.target as HTMLInputElement).value) || 0)} />
+            <span class="prop-unit">ms</span>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'glitch' && (
+        <>
+          <PropertyRow label="Intensity">
+            <input type="range" min="0.1" max="3" step="0.1" value={cfg.intensity ?? 1.0}
+              onInput={(e) => updateConfig('intensity', parseFloat((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{(cfg.intensity ?? 1.0).toFixed(1)}x</span>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'vignette' && (
+        <>
+          <PropertyRow label="Strength">
+            <input type="range" min="0.1" max="1" step="0.05" value={cfg.strength ?? 0.55}
+              onInput={(e) => updateConfig('strength', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Inner R">
+            <input type="range" min="0" max="0.8" step="0.05" value={cfg.innerRadius ?? 0.3}
+              onInput={(e) => updateConfig('innerRadius', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Outer R">
+            <input type="range" min="0.3" max="1.5" step="0.05" value={cfg.outerRadius ?? 0.8}
+              onInput={(e) => updateConfig('outerRadius', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Color">
+            <select value={cfg.color ?? '0,0,0'}
+              onChange={(e) => updateConfig('color', (e.target as HTMLSelectElement).value)}>
+              <option value="0,0,0">Black</option>
+              <option value="232,66,63">Red</option>
+              <option value="0,0,80">Dark Blue</option>
+              <option value="60,0,60">Purple</option>
+            </select>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'scanlines' && (
+        <>
+          <PropertyRow label="Spacing">
+            <input type="range" min="2" max="12" step="1" value={cfg.spacing ?? 4}
+              onInput={(e) => updateConfig('spacing', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.spacing ?? 4}px</span>
+          </PropertyRow>
+          <PropertyRow label="Thick">
+            <input type="range" min="1" max="6" step="1" value={cfg.thickness ?? 2}
+              onInput={(e) => updateConfig('thickness', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Opacity">
+            <input type="range" min="0.01" max="0.3" step="0.01" value={cfg.opacity ?? 0.05}
+              onInput={(e) => updateConfig('opacity', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Color">
+            <input type="color" value={cfg.color ?? '#000000'}
+              onInput={(e) => updateConfig('color', (e.target as HTMLInputElement).value)} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'grid' && (
+        <>
+          <PropertyRow label="Spacing">
+            <input type="range" min="20" max="150" step="5" value={cfg.spacing ?? 60}
+              onInput={(e) => updateConfig('spacing', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.spacing ?? 60}px</span>
+          </PropertyRow>
+          <PropertyRow label="Color">
+            <input type="color" value={cfg.color ?? '#E8423F'}
+              onInput={(e) => updateConfig('color', (e.target as HTMLInputElement).value)} />
+          </PropertyRow>
+          <PropertyRow label="Line W">
+            <input type="range" min="0.5" max="4" step="0.5" value={cfg.lineWidth ?? 1}
+              onInput={(e) => updateConfig('lineWidth', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Speed">
+            <input type="range" min="0" max="5" step="0.5" value={cfg.speed ?? 1}
+              onInput={(e) => updateConfig('speed', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Opacity">
+            <input type="range" min="0.01" max="0.2" step="0.01" value={cfg.opacity ?? 0.04}
+              onInput={(e) => updateConfig('opacity', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'corner-accents' && (
+        <>
+          <PropertyRow label="Margin">
+            <input type="range" min="10" max="100" step="5" value={cfg.margin ?? 40}
+              onInput={(e) => updateConfig('margin', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.margin ?? 40}px</span>
+          </PropertyRow>
+          <PropertyRow label="Length">
+            <input type="range" min="20" max="150" step="5" value={cfg.length ?? 60}
+              onInput={(e) => updateConfig('length', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Line W">
+            <input type="range" min="1" max="8" step="1" value={cfg.lineWidth ?? 3}
+              onInput={(e) => updateConfig('lineWidth', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Color">
+            <input type="color" value={cfg.color ?? '#E8423F'}
+              onInput={(e) => updateConfig('color', (e.target as HTMLInputElement).value)} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'sweep' && (
+        <>
+          <PropertyRow label="Speed">
+            <input type="range" min="0.3" max="3" step="0.1" value={cfg.speed ?? 1}
+              onInput={(e) => updateConfig('speed', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Width">
+            <input type="range" min="50" max="500" step="25" value={cfg.sweepWidth ?? 200}
+              onInput={(e) => updateConfig('sweepWidth', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.sweepWidth ?? 200}px</span>
+          </PropertyRow>
+          <PropertyRow label="Count">
+            <input type="range" min="1" max="6" step="1" value={cfg.count ?? 3}
+              onInput={(e) => updateConfig('count', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.count ?? 3}</span>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'particles' && (
+        <>
+          <PropertyRow label="Max" tooltip="Maximum particle count on screen">
+            <input type="range" min="20" max="200" step="10" value={cfg.maxCount ?? 80}
+              onInput={(e) => updateConfig('maxCount', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.maxCount ?? 80}</span>
+          </PropertyRow>
+          <PropertyRow label="Spawn" tooltip="Spawn probability per frame (higher = more particles)">
+            <input type="range" min="0.1" max="1" step="0.1" value={cfg.spawnRate ?? 0.7}
+              onInput={(e) => updateConfig('spawnRate', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Size Min">
+            <input type="range" min="1" max="10" step="1" value={cfg.sizeMin ?? 2}
+              onInput={(e) => updateConfig('sizeMin', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Size Max">
+            <input type="range" min="2" max="20" step="1" value={cfg.sizeMax ?? 5}
+              onInput={(e) => updateConfig('sizeMax', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Gravity" tooltip="Vertical pull (-0.5 = up, 0 = float, 0.5 = fall)">
+            <input type="range" min="-0.5" max="0.5" step="0.05" value={cfg.gravity ?? 0}
+              onInput={(e) => updateConfig('gravity', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Color 1">
+            <input type="color" value={cfg.color1 ?? '#E8423F'}
+              onInput={(e) => updateConfig('color1', (e.target as HTMLInputElement).value)} />
+          </PropertyRow>
+          <PropertyRow label="Color 2">
+            <input type="color" value={cfg.color2 ?? '#FFFFFF'}
+              onInput={(e) => updateConfig('color2', (e.target as HTMLInputElement).value)} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'strobe' && (
+        <>
+          <PropertyRow label="Color" tooltip="Flash color">
+            <input type="color" value={cfg.color ?? '#FFFFFF'}
+              onInput={(e) => updateConfig('color', (e.target as HTMLInputElement).value)} />
+          </PropertyRow>
+          <PropertyRow label="Intensity" tooltip="Flash brightness (0-1)">
+            <input type="range" min="0.1" max="1" step="0.05" value={cfg.intensity ?? 0.8}
+              onInput={(e) => updateConfig('intensity', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Beat Div" tooltip="Beat division (1 = quarter, 2 = eighth, 0.5 = half)">
+            <select value={cfg.beatDiv ?? 1}
+              onChange={(e) => updateConfig('beatDiv', parseFloat((e.target as HTMLSelectElement).value))}>
+              <option value="0.25">Whole</option>
+              <option value="0.5">Half</option>
+              <option value="1">Quarter</option>
+              <option value="2">Eighth</option>
+              <option value="4">Sixteenth</option>
+            </select>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'film-grain' && (
+        <>
+          <PropertyRow label="Intensity" tooltip="Grain visibility (0 = none, 1 = very noisy)">
+            <input type="range" min="0.05" max="0.8" step="0.05" value={cfg.intensity ?? 0.3}
+              onInput={(e) => updateConfig('intensity', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Size" tooltip="Grain pixel size (1 = fine, 4+ = coarse)">
+            <input type="range" min="1" max="6" step="1" value={cfg.grainSize ?? 2}
+              onInput={(e) => updateConfig('grainSize', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Mono" tooltip="Monochrome grain (off = color noise)">
+            <input type="checkbox" checked={cfg.mono !== false}
+              onChange={() => updateConfig('mono', cfg.mono === false)} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'chromatic-aberration' && (
+        <>
+          <PropertyRow label="Intensity" tooltip="Pixel offset for RGB channel separation">
+            <input type="range" min="1" max="20" step="1" value={cfg.intensity ?? 4}
+              onInput={(e) => updateConfig('intensity', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.intensity ?? 4}px</span>
+          </PropertyRow>
+          <PropertyRow label="Angle" tooltip="Direction of the color split (degrees)">
+            <input type="range" min="0" max="360" step="15" value={cfg.angle ?? 0}
+              onInput={(e) => updateConfig('angle', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.angle ?? 0}°</span>
+          </PropertyRow>
+          <PropertyRow label="Edge Only" tooltip="Only apply near frame edges (cinematic lens effect)">
+            <input type="checkbox" checked={cfg.edgeOnly ?? false}
+              onChange={() => updateConfig('edgeOnly', !(cfg.edgeOnly ?? false))} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'color-grading' && (
+        <>
+          <PropertyRow label="Preset" tooltip="Color grading preset (adjusts all sliders)">
+            <select value={cfg.preset ?? 'none'}
+              onChange={(e) => {
+                const v = (e.target as HTMLSelectElement).value;
+                updateConfig('preset', v);
+                updateConfig('hue', undefined);
+                updateConfig('saturation', undefined);
+                updateConfig('brightness', undefined);
+                updateConfig('contrast', undefined);
+              }}>
+              <option value="none">None</option>
+              <option value="warm">Warm</option>
+              <option value="cool">Cool</option>
+              <option value="vintage">Vintage</option>
+              <option value="cyberpunk">Cyberpunk</option>
+              <option value="noir">Noir</option>
+            </select>
+          </PropertyRow>
+          <PropertyRow label="Hue" tooltip="Hue rotation in degrees (-180 to 180)">
+            <input type="range" min="-180" max="180" step="5" value={cfg.hue ?? 0}
+              onInput={(e) => updateConfig('hue', parseInt((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Sat" tooltip="Saturation adjustment (-1 = desaturate, 0 = normal, 1 = vivid)">
+            <input type="range" min="-1" max="1" step="0.05" value={cfg.saturation ?? 0}
+              onInput={(e) => updateConfig('saturation', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Bright" tooltip="Brightness multiplier (-0.5 = dark, 0 = normal, 0.5 = bright)">
+            <input type="range" min="-0.5" max="0.5" step="0.05" value={cfg.brightness ?? 0}
+              onInput={(e) => updateConfig('brightness', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Contrast" tooltip="Contrast boost (-0.5 to 0.5)">
+            <input type="range" min="-0.5" max="0.5" step="0.05" value={cfg.contrast ?? 0}
+              onInput={(e) => updateConfig('contrast', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'zoom-pulse' && (
+        <>
+          <PropertyRow label="Amount" tooltip="Zoom intensity per beat pulse">
+            <input type="range" min="0.01" max="0.15" step="0.01" value={cfg.amount ?? 0.03}
+              onInput={(e) => updateConfig('amount', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Beat Div" tooltip="Beat division for pulse timing">
+            <select value={cfg.beatDiv ?? 1}
+              onChange={(e) => updateConfig('beatDiv', parseFloat((e.target as HTMLSelectElement).value))}>
+              <option value="0.5">Half</option>
+              <option value="1">Quarter</option>
+              <option value="2">Eighth</option>
+            </select>
+          </PropertyRow>
+          <PropertyRow label="Decay" tooltip="How quickly the pulse fades (higher = snappier)">
+            <input type="range" min="1" max="6" step="0.5" value={cfg.decay ?? 2}
+              onInput={(e) => updateConfig('decay', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'blur-transition' && (
+        <>
+          <PropertyRow label="Max Blur" tooltip="Maximum blur radius in pixels">
+            <input type="range" min="2" max="50" step="2" value={cfg.maxBlur ?? 20}
+              onInput={(e) => updateConfig('maxBlur', parseInt((e.target as HTMLInputElement).value))} />
+            <span class="prop-unit">{cfg.maxBlur ?? 20}px</span>
+          </PropertyRow>
+          <PropertyRow label="Start" tooltip="Start time of the blur effect (ms)">
+            <input type="number" min="0" step="100" value={cfg.startTime ?? 0} class="prop-num-input"
+              onInput={(e) => updateConfig('startTime', parseInt((e.target as HTMLInputElement).value) || 0)} />
+            <span class="prop-unit">ms</span>
+          </PropertyRow>
+          <PropertyRow label="End" tooltip="End time of the blur effect (ms)">
+            <input type="number" min="0" step="100" value={cfg.endTime ?? project.value.settings.duration} class="prop-num-input"
+              onInput={(e) => updateConfig('endTime', parseInt((e.target as HTMLInputElement).value) || 0)} />
+            <span class="prop-unit">ms</span>
+          </PropertyRow>
+          <PropertyRow label="Mode" tooltip="Blur direction: in (blur→clear), out (clear→blur), or pulse">
+            <select value={cfg.mode ?? 'in-out'}
+              onChange={(e) => updateConfig('mode', (e.target as HTMLSelectElement).value)}>
+              <option value="in">Blur In (blur→clear)</option>
+              <option value="out">Blur Out (clear→blur)</option>
+              <option value="in-out">Pulse (clear→blur→clear)</option>
+            </select>
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'parallax-drift' && (
+        <>
+          <PropertyRow label="Speed X" tooltip="Horizontal camera drift speed">
+            <input type="range" min="-0.1" max="0.1" step="0.005" value={cfg.speedX ?? 0.02}
+              onInput={(e) => updateConfig('speedX', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Speed Y" tooltip="Vertical camera drift speed">
+            <input type="range" min="-0.1" max="0.1" step="0.005" value={cfg.speedY ?? 0.01}
+              onInput={(e) => updateConfig('speedY', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+          <PropertyRow label="Zoom" tooltip="How much the frame zooms during drift">
+            <input type="range" min="0" max="0.2" step="0.01" value={cfg.zoomAmount ?? 0.05}
+              onInput={(e) => updateConfig('zoomAmount', parseFloat((e.target as HTMLInputElement).value))} />
+          </PropertyRow>
+        </>
+      )}
+
+      {layer.effectType === 'mirror' && (
+        <>
+          <PropertyRow label="Mode" tooltip="Mirror axis or kaleidoscope pattern">
+            <select value={cfg.mode ?? 'horizontal'}
+              onChange={(e) => updateConfig('mode', (e.target as HTMLSelectElement).value)}>
+              <option value="horizontal">Horizontal</option>
+              <option value="vertical">Vertical</option>
+              <option value="both">Both</option>
+              <option value="kaleidoscope">Kaleidoscope</option>
+            </select>
+          </PropertyRow>
+          {(cfg.mode === 'kaleidoscope') && (
+            <PropertyRow label="Segments" tooltip="Number of kaleidoscope segments">
+              <input type="range" min="4" max="12" step="2" value={cfg.segments ?? 6}
+                onInput={(e) => updateConfig('segments', parseInt((e.target as HTMLInputElement).value))} />
+              <span class="prop-unit">{cfg.segments ?? 6}</span>
+            </PropertyRow>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+function ShapeProperties({ layer }: { layer: ShapeLayer }) {
+  return (
+    <>
+      <PropSubheading label="Shape" />
+      <PropertyRow label="Type">
+        <select value={layer.shapeType}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, shapeType: (e.target as HTMLSelectElement).value as ShapeLayer['shapeType'] }))}>
+          <option value="rect">Rectangle</option>
+          <option value="rounded-rect">Rounded Rect</option>
+          <option value="ellipse">Ellipse</option>
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Width">
+        <input type="number" min="1" value={layer.size.width} class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, size: { ...(l as ShapeLayer).size, width: parseInt((e.target as HTMLInputElement).value) || 1 } }))} />
+      </PropertyRow>
+      <PropertyRow label="Height">
+        <input type="number" min="1" value={layer.size.height} class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, size: { ...(l as ShapeLayer).size, height: parseInt((e.target as HTMLInputElement).value) || 1 } }))} />
+      </PropertyRow>
+      <PropertyRow label="Fill">
+        <input type="checkbox" checked={layer.fill.enabled}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, fill: { ...(l as ShapeLayer).fill, enabled: !(l as ShapeLayer).fill.enabled } }))} />
+        {layer.fill.enabled && (
+          <input type="color" value={layer.fill.color}
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, fill: { ...(l as ShapeLayer).fill, color: (e.target as HTMLInputElement).value } }))} />
+        )}
+      </PropertyRow>
+      <PropertyRow label="Stroke">
+        <input type="checkbox" checked={layer.stroke.enabled}
+          onChange={() => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as ShapeLayer).stroke, enabled: !(l as ShapeLayer).stroke.enabled } }))} />
+        {layer.stroke.enabled && (
+          <input type="color" value={layer.stroke.color}
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as ShapeLayer).stroke, color: (e.target as HTMLInputElement).value } }))} />
+        )}
+      </PropertyRow>
+      {layer.stroke.enabled && (
+        <PropertyRow label="Stroke W">
+          <input type="range" min="1" max="20" step="1" value={layer.stroke.width}
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as ShapeLayer).stroke, width: parseInt((e.target as HTMLInputElement).value) } }))} />
+        </PropertyRow>
+      )}
+      {(layer.shapeType === 'rounded-rect') && (
+        <PropertyRow label="Radius">
+          <input type="range" min="0" max="100" step="1" value={layer.cornerRadius}
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, cornerRadius: parseInt((e.target as HTMLInputElement).value) }))} />
+        </PropertyRow>
+      )}
+    </>
+  );
+}
+
+function VideoProperties({ layer }: { layer: VideoLayer }) {
+  const handleVideoUpload = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const assetId = `asset_${Date.now().toString(36)}`;
+      await loadVideoAsset(assetId, file);
+      updateLayer(layer.id, l => ({
+        ...l,
+        assetId,
+      }));
+    };
+    input.click();
+  };
+
+  return (
+    <>
+      <PropSubheading label="Video Slice" />
+      <PropertyRow label="Video">
+        <button class="prop-upload-btn" onClick={handleVideoUpload}>
+          {layer.assetId ? 'Change Video' : 'Upload Video'}
+        </button>
+      </PropertyRow>
+      <PropertyRow label="Orient">
+        <select value={layer.orientation}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, orientation: (e.target as HTMLSelectElement).value as 'horizontal' | 'vertical' }))}>
+          <option value="horizontal">Horizontal</option>
+          <option value="vertical">Vertical</option>
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Thick">
+        <input type="range" min="50" max="1000" step="10" value={layer.thickness}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, thickness: parseInt((e.target as HTMLInputElement).value) }))} />
+        <span class="prop-unit">{layer.thickness}px</span>
+      </PropertyRow>
+      <PropertyRow label="Pan">
+        <input type="range" min="0" max="1" step="0.01" value={layer.videoPan}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, videoPan: parseFloat((e.target as HTMLInputElement).value) }))} />
+      </PropertyRow>
+      <PropSubheading label="Fade" />
+      <PropertyRow label="In Time">
+        <input type="number" min="0" step="100" value={layer.fadeInTime} class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, fadeInTime: parseInt((e.target as HTMLInputElement).value) || 0 }))} />
+        <span class="prop-unit">ms</span>
+      </PropertyRow>
+      <PropertyRow label="Out Time">
+        <input type="number" min="0" step="100" value={layer.fadeOutTime} class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, fadeOutTime: parseInt((e.target as HTMLInputElement).value) || 0 }))} />
+        <span class="prop-unit">ms</span>
+      </PropertyRow>
+      <PropertyRow label="Duration">
+        <input type="number" min="0" step="100" value={layer.fadeDuration} class="prop-num-input"
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, fadeDuration: parseInt((e.target as HTMLInputElement).value) || 0 }))} />
+        <span class="prop-unit">ms</span>
+      </PropertyRow>
+      <PropSubheading label="Slide" />
+      <PropertyRow label="In">
+        <select value={layer.slideIn}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, slideIn: (e.target as HTMLSelectElement).value as VideoLayer['slideIn'] }))}>
+          <option value="none">None</option>
+          <option value="top">Top</option>
+          <option value="bottom">Bottom</option>
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+        </select>
+      </PropertyRow>
+      <PropertyRow label="Out">
+        <select value={layer.slideOut}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, slideOut: (e.target as HTMLSelectElement).value as VideoLayer['slideOut'] }))}>
+          <option value="none">None</option>
+          <option value="top">Top</option>
+          <option value="bottom">Bottom</option>
+          <option value="left">Left</option>
           <option value="right">Right</option>
         </select>
       </PropertyRow>
@@ -194,23 +1387,111 @@ function TextProperties({ layer }: { layer: Layer & { type: 'text' } }) {
   );
 }
 
-function EffectProperties({ layer }: { layer: Layer & { type: 'effect' } }) {
+function BgLogoProperties({ layer }: { layer: BackgroundLogoLayer }) {
+  const handleImageUpload = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const assetId = `asset_${Date.now().toString(36)}`;
+      await loadImageAsset(assetId, file);
+      updateLayer(layer.id, l => ({
+        ...l,
+        assetId,
+      }));
+    };
+    input.click();
+  };
+
   return (
-    <PropertyRow label="Effect">
-      <span class="prop-value-readonly">{layer.effectType}</span>
-    </PropertyRow>
+    <>
+      <PropSubheading label="Background Logo" />
+      <PropertyRow label="Image">
+        <button class="prop-upload-btn" onClick={handleImageUpload}>
+          {layer.assetId ? 'Change Image' : 'Upload Image'}
+        </button>
+      </PropertyRow>
+      <PropertyRow label="Scale">
+        <input type="range" min="0.1" max="3" step="0.05" value={layer.logoScale}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, logoScale: parseFloat((e.target as HTMLInputElement).value) }))} />
+        <span class="prop-unit">{layer.logoScale.toFixed(2)}</span>
+      </PropertyRow>
+      <PropertyRow label="Speed">
+        <input type="range" min="0" max="1" step="0.01" value={layer.speed}
+          onInput={(e) => updateLayer(layer.id, l => ({ ...l, speed: parseFloat((e.target as HTMLInputElement).value) }))} />
+        <span class="prop-unit">{layer.speed.toFixed(2)}</span>
+      </PropertyRow>
+      <PropertyRow label="Direction">
+        <select value={layer.clockDir}
+          onChange={(e) => updateLayer(layer.id, l => ({ ...l, clockDir: parseInt((e.target as HTMLSelectElement).value) }))}>
+          {Object.entries(CLOCK_DIRECTIONS).map(([val, label]) => (
+            <option key={val} value={val}>{label}</option>
+          ))}
+        </select>
+      </PropertyRow>
+    </>
   );
 }
 
 const sidebarStyles = `
 .sidebar {
-  width: var(--sidebar-width);
+  width: 258px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
   flex-shrink: 0;
+}
+
+.sidebar-tools { max-height: 42%; overflow-y: auto; flex-shrink: 0; }
+.sidebar-layer-section { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.sidebar-layer-section .layer-list { overflow-y: auto; min-height: 0; flex: 1; }
+.rollup-section { border-bottom: 1px solid var(--border); }
+.rollup-header {
+  display: flex; justify-content: space-between; align-items: center;
+  width: 100%; padding: 10px 14px; background: var(--bg-tertiary);
+  color: var(--text-secondary); text-align: left; font-size: 11px;
+  font-weight: 650; text-transform: uppercase; letter-spacing: .8px;
+  cursor: pointer;
+}
+.rollup-header:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.rollup-chevron { display: inline-block; width: 14px; color: var(--accent); }
+.rollup-content > div { border-bottom: 0; }
+.rollup-content .sidebar-header { display: none; }
+
+.inspector {
+  width: 340px; flex-shrink: 0; display: flex; flex-direction: column;
+  min-height: 0; background: var(--bg-secondary); border-left: 1px solid var(--border);
+}
+.inspector-header {
+  min-height: 42px; padding: 10px 14px; display: flex; flex-direction: column;
+  gap: 2px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary);
+}
+.inspector-header strong { font-size: 11px; letter-spacing: .8px; text-transform: uppercase; }
+.inspector-header span { font-size: 12px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.inspector-empty, .inspector-note { padding: 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.inspector-note { background: rgba(34, 211, 238, .08); border-bottom: 1px solid var(--border); }
+.inspector-group { border-bottom: 1px solid var(--border); }
+.inspector-group summary {
+  padding: 10px 14px; background: var(--bg-tertiary); cursor: pointer;
+  color: var(--text-secondary); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .6px;
+}
+.inspector-group summary:hover { color: var(--text-primary); }
+
+@media (max-width: 1100px) {
+  .sidebar { width: 220px; }
+  .inspector { width: 280px; }
+}
+@media (max-width: 780px) {
+  .shell-main { flex-wrap: wrap; overflow-y: auto; }
+  .sidebar { width: 42%; height: 45%; order: 1; }
+  .inspector { width: 58%; height: 45%; order: 2; }
+  .shell-canvas-area { order: 0; flex: 0 0 100%; height: 55%; }
 }
 
 .sidebar-section {
@@ -240,6 +1521,13 @@ const sidebarStyles = `
 .layer-list {
   padding: 4px;
 }
+
+.layer-selection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px 8px; color: var(--text-secondary); font-size: 11px; }
+.layer-selection-toolbar button { padding: 5px 10px; border-radius: 4px; background: var(--accent); color: #071015; font-weight: 700; }
+.layer-selection-toolbar button:disabled { opacity: .4; cursor: default; }
+.layer-multi-check { flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
+.layer-item-member { padding-left: 20px; }
+.layer-group-count { color: var(--text-muted); font-size: 10px; }
 
 .layer-item {
   display: flex;
@@ -275,6 +1563,12 @@ const sidebarStyles = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.layer-item-hidden .layer-name,
+.layer-item-hidden .layer-type-badge { opacity: .48; }
+.layer-visibility-btn { flex: 0 0 28px; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 4px; }
+.layer-visibility-btn:hover { background: var(--border-hover); }
+.layer-visibility-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.layer-visibility-off { color: var(--text-muted); }
 
 .layer-actions {
   display: flex;
@@ -323,10 +1617,14 @@ const sidebarStyles = `
   color: var(--text-secondary);
   min-width: 55px;
   text-align: right;
+  flex-shrink: 0;
 }
 
 .prop-control {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .prop-control input[type="text"],
@@ -348,10 +1646,47 @@ const sidebarStyles = `
   padding: 0;
   border: 1px solid var(--border);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .prop-control input[type="checkbox"] {
   accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.prop-control input[type="range"] {
+  flex: 1;
+  min-width: 60px;
+}
+
+.prop-num-input {
+  width: 70px !important;
+  flex: 0 0 70px !important;
+  text-align: center;
+}
+
+.laser-origin-hint { padding: 8px 0 4px 63px; color: var(--text-muted); font-size: 10px; line-height: 1.35; }
+.laser-beam-settings { border-top: 1px solid var(--border); padding: 3px 0; }
+.laser-origin-fields { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--text-secondary); }
+.laser-origin-fields label { display: flex; align-items: center; gap: 3px; }
+.laser-origin-fields input { width: 48px; padding: 3px 4px; text-align: center; font-size: 11px; }
+.laser-beam-settings .prop-control > input[type="number"] { width: 50px; min-width: 0; flex: 0 0 50px; padding: 3px 4px; text-align: center; font-size: 11px; }
+
+.prop-font-size-input {
+  width: 58px;
+  flex: 0 0 58px;
+  min-width: 0;
+  padding: 4px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.prop-unit {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+  min-width: 28px;
 }
 
 .prop-value-readonly {
@@ -359,6 +1694,29 @@ const sidebarStyles = `
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
+
+.prop-subheading {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  margin-top: 10px;
+  margin-bottom: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.prop-upload-btn {
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  transition: background 0.15s;
+  cursor: pointer;
+}
+.prop-upload-btn:hover { background: var(--border-hover); color: var(--text-primary); }
 
 .property-danger-zone {
   margin-top: 16px;

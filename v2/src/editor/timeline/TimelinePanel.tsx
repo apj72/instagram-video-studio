@@ -1,7 +1,9 @@
-import { useRef, useCallback, useState } from 'preact/hooks';
+import { useRef, useCallback, useEffect, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { project, currentTime, selectedLayerId, zoom, updateLayer } from '../../core/state.ts';
+import { project, currentTime, selectedLayerId, selectedLayerIds, zoom, updateLayer } from '../../core/state.ts';
+import { getGroupForLayer } from '../../core/groups.ts';
 import { evaluateProperty } from '../../timeline/interpolation.ts';
+import { getLayerEvents, getVisibleSpan } from '../../timeline/events.ts';
 import type { Layer, AnimatedProperty, EasingType, Keyframe } from '../../core/schema.ts';
 
 interface TimelinePanelProps {
@@ -65,6 +67,8 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
   const z = zoom.value;
   const rulerRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
+  const trackLabelsRef = useRef<HTMLDivElement>(null);
+  const [showBeats, setShowBeats] = useState(false);
   const [draggingKf, setDraggingKf] = useState<{
     layerId: string;
     path: string[];
@@ -83,6 +87,26 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
   const totalWidth = z * 100;
   const playheadPct = dur > 0 ? (time / dur) * 100 : 0;
   const propName = selectedPropertyName.value;
+  const activeLayer = layers.find(layer => layer.id === selectedLayerId.value);
+  const events = activeLayer ? getLayerEvents(activeLayer, dur) : [];
+
+  useEffect(() => {
+    const index = layers.findIndex(layer => layer.id === selectedLayerId.value);
+    const tracks = trackAreaRef.current;
+    if (index < 0 || !tracks) return;
+    const target = Math.max(0, index * 28 - tracks.clientHeight / 2 + 14);
+    tracks.scrollTop = target;
+    if (trackLabelsRef.current) trackLabelsRef.current.scrollTop = target;
+    const playheadX = (currentTime.value / dur) * tracks.scrollWidth;
+    tracks.scrollLeft = Math.max(0, playheadX - tracks.clientWidth / 2);
+    if (rulerRef.current) rulerRef.current.scrollLeft = tracks.scrollLeft;
+  }, [selectedLayerId.value, layers.length, dur]);
+
+  const jumpEvent = (direction: -1 | 1) => {
+    const ordered = direction === 1 ? events : [...events].reverse();
+    const next = ordered.find(event => direction === 1 ? event.time > time + 20 : event.time < time - 20);
+    if (next) onSeek(next.time);
+  };
 
   const handleRulerClick = useCallback((e: MouseEvent) => {
     const el = rulerRef.current;
@@ -99,6 +123,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     if (rulerRef.current) {
       rulerRef.current.scrollLeft = el.scrollLeft;
     }
+    if (trackLabelsRef.current) trackLabelsRef.current.scrollTop = el.scrollTop;
   }, []);
 
   const handleZoomChange = useCallback((e: Event) => {
@@ -196,13 +221,13 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     setEasingMenu(null);
   }, []);
 
-  const handleTrackBarClick = useCallback((e: MouseEvent, layerId: string) => {
+  const handleTrackBarClick = useCallback((e: MouseEvent, layerId: string, start: number, end: number) => {
     const target = e.currentTarget as HTMLDivElement;
     const rect = target.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const pct = clickX / rect.width;
-    handleAddKeyframe(layerId, pct);
-  }, [handleAddKeyframe]);
+    handleAddKeyframe(layerId, (start + pct * (end - start)) / dur);
+  }, [handleAddKeyframe, dur]);
 
   const beatIntervalMs = bpmVal > 0 ? (60 / bpmVal) * 1000 : 0;
 
@@ -214,7 +239,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
       onMouseLeave={draggingKf ? handleMouseUp : undefined}
     >
       <div class="timeline-toolbar">
-        <span class="timeline-toolbar-label">Timeline</span>
+        <span class="timeline-toolbar-label">Timeline <small>Click a keyframe to jump; drag it to retime</small></span>
         <div class="timeline-toolbar-controls">
           <label class="tl-prop-label">Property:</label>
           <select
@@ -242,18 +267,37 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
               class="timeline-zoom-slider"
             />
           </div>
+          <label class="timeline-beats-toggle" title="Show BPM grid markers on the ruler">
+            <input type="checkbox" checked={showBeats} onChange={() => setShowBeats(value => !value)} /> Beats
+          </label>
+        </div>
+      </div>
+      <div class="timeline-events" aria-label="Selected layer events">
+        <span class="timeline-events-title">{activeLayer ? `${activeLayer.name} events` : 'Select a layer for events'}</span>
+        <button class="timeline-event-step" disabled={!events.some(event => event.time < time - 20)} onClick={() => jumpEvent(-1)} title="Previous event">◀ Prev</button>
+        <button class="timeline-event-step" disabled={!events.some(event => event.time > time + 20)} onClick={() => jumpEvent(1)} title="Next event">Next ▶</button>
+        <div class="timeline-event-list">
+          {events.map((event, index) => (
+            <button key={`${event.time}-${index}`} class={`timeline-event-chip ${Math.abs(event.time - time) < 30 ? 'timeline-event-active' : ''}`}
+              title={`${event.properties.join(', ')} at ${(event.time / 1000).toFixed(2)} seconds`}
+              onClick={() => onSeek(event.time)}>
+              {(event.time / 1000).toFixed(2)}s · {event.label}
+            </button>
+          ))}
+          {activeLayer && events.length === 0 && <span class="timeline-events-empty">This layer has no animation events.</span>}
         </div>
       </div>
       <div class="timeline-body">
-        <div class="track-labels">
+        <div ref={trackLabelsRef} class="track-labels">
           <div class="track-label-header">Layer</div>
           {layers.map(layer => (
             <div
               key={layer.id}
-              class={`track-label ${selectedLayerId.value === layer.id ? 'track-label-selected' : ''}`}
-              onClick={() => { selectedLayerId.value = layer.id; }}
+              class={`track-label ${selectedLayerId.value === layer.id ? 'track-label-selected' : ''} ${layer.visible ? '' : 'track-label-hidden'}`}
+              title={`${layer.name}${layer.visible ? '' : ' (hidden)'}`}
+              onClick={() => { selectedLayerIds.value = []; selectedLayerId.value = layer.id; }}
             >
-              {layer.name}
+              {getGroupForLayer(layers, layer.id) ? '↳ ' : ''}{layer.name}{layer.visible ? '' : ' (hidden)'}
             </div>
           ))}
         </div>
@@ -266,7 +310,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
           >
             <div class="ruler-inner" style={{ width: `${totalWidth}%` }}>
               <TimeRulerMarks durationMs={dur} zoom={z} />
-              {beatIntervalMs > 0 && <BeatMarkers durationMs={dur} beatIntervalMs={beatIntervalMs} />}
+              {showBeats && beatIntervalMs > 0 && <BeatMarkers durationMs={dur} beatIntervalMs={beatIntervalMs} />}
               <div class="timeline-playhead" style={{ left: `${playheadPct / z}%` }} />
             </div>
           </div>
@@ -278,38 +322,51 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
             {layers.map(layer => {
               const entries = getAnimatedProperties(layer);
               const selectedEntry = entries.find(e => e.name === propName);
+              const visibleSpan = getVisibleSpan(layer, dur);
               return (
                 <div
                   key={layer.id}
-                  class={`timeline-track ${selectedLayerId.value === layer.id ? 'timeline-track-selected' : ''}`}
-                  onClick={() => { selectedLayerId.value = layer.id; }}
+                  class={`timeline-track track-type-${layer.type} ${selectedLayerId.value === layer.id ? 'timeline-track-selected' : ''} ${layer.visible ? '' : 'timeline-track-hidden'}`}
+                  onClick={() => { selectedLayerIds.value = []; selectedLayerId.value = layer.id; }}
                 >
                   <div class="track-bar-area" style={{ width: `${totalWidth}%` }}>
                     <div
                       class="track-bar"
                       style={{
-                        left: `${(layer.inTime / dur) * 100}%`,
-                        width: `${((layer.outTime - layer.inTime) / dur) * 100}%`,
+                        left: `${(visibleSpan.start / dur) * 100}%`,
+                        width: `${((visibleSpan.end - visibleSpan.start) / dur) * 100}%`,
                       }}
-                      onDblClick={(e) => handleTrackBarClick(e, layer.id)}
+                      title={`${layer.name}: visible ${(visibleSpan.start / 1000).toFixed(2)}–${(visibleSpan.end / 1000).toFixed(2)}s. Double-click to add a ${propName} keyframe.`}
+                      onDblClick={(e) => handleTrackBarClick(e, layer.id, visibleSpan.start, visibleSpan.end)}
                     >
                       <span class="track-bar-label">{layer.name}</span>
-                      {selectedEntry && selectedEntry.prop.keyframes.map((kf, ki) => {
-                        const kfPct = dur > 0 ? ((kf.time - layer.inTime) / (layer.outTime - layer.inTime)) * 100 : 0;
+                    </div>
+                    {layer.type === 'group' && layer.entrance && layer.entrance.direction !== 'none' && layer.children.map((id, index) => {
+                      const start = layer.entrance!.startTime + index * layer.entrance!.stagger;
+                      if (start < 0 || start > dur) return null;
+                      return <button key={id} class="group-entrance-marker"
+                        style={{ left: `${(start / dur) * 100}%` }}
+                        title={`Jump to ${layer.name} member ${index + 1} entrance at ${(start / 1000).toFixed(2)}s`}
+                        aria-label={`Jump to group member ${index + 1} entrance`}
+                        onClick={(e) => { e.stopPropagation(); selectedLayerId.value = layer.id; onSeek(start); }} />;
+                    })}
+                      {selectedLayerId.value === layer.id && selectedEntry && selectedEntry.prop.keyframes.map((kf, ki) => {
+                        const kfPct = dur > 0 ? (kf.time / dur) * 100 : 0;
                         if (kfPct < 0 || kfPct > 100) return null;
                         const color = PROPERTY_COLORS[propName] ?? '#FFD700';
                         return (
-                          <div
+                          <button
                             key={`${selectedEntry.name}-${ki}`}
                             class="kf-diamond"
-                            style={{ left: `${kfPct}%`, borderColor: color }}
-                            title={`${selectedEntry.name}: ${kf.value.toFixed(2)} @ ${(kf.time / 1000).toFixed(2)}s [${kf.easing}]`}
+                            style={{ left: `${kfPct}%`, borderColor: color, backgroundColor: color }}
+                            aria-label={`Jump to ${layer.name} ${selectedEntry.name} keyframe at ${(kf.time / 1000).toFixed(2)} seconds`}
+                            title={`Click to jump · ${selectedEntry.name}: ${kf.value.toFixed(2)} @ ${(kf.time / 1000).toFixed(2)}s [${kf.easing}]. Drag to retime.`}
                             onMouseDown={(e) => handleKeyframeMouseDown(e, layer.id, selectedEntry.path, ki, kf.time)}
+                            onClick={(e) => { e.stopPropagation(); selectedLayerId.value = layer.id; onSeek(kf.time); }}
                             onContextMenu={(e) => handleKeyframeContextMenu(e, layer.id, selectedEntry.path, ki)}
                           />
                         );
                       })}
-                    </div>
                     <div class="timeline-playhead-track" style={{ left: `${playheadPct / z}%` }} />
                   </div>
                 </div>
@@ -412,12 +469,24 @@ const timelineStyles = `
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 28px;
+  height: 34px;
   padding: 0 12px;
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+
+.timeline-toolbar-label { white-space: nowrap; }
+.timeline-toolbar-label small { margin-left: 12px; font-size: 10px; font-weight: 400; color: var(--text-muted); text-transform: none; letter-spacing: 0; }
+.timeline-beats-toggle { display: flex; align-items: center; gap: 4px; color: var(--text-secondary); font-size: 10px; cursor: pointer; }
+.timeline-events { display: flex; align-items: center; gap: 6px; min-height: 42px; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+.timeline-events-title { max-width: 180px; min-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11px; }
+.timeline-event-step, .timeline-event-chip { flex-shrink: 0; border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text-primary); border-radius: 4px; padding: 5px 8px; font-size: 10px; cursor: pointer; }
+.timeline-event-step:hover, .timeline-event-chip:hover { border-color: var(--accent); }
+.timeline-event-step:disabled { opacity: .35; cursor: default; }
+.timeline-event-list { display: flex; align-items: center; gap: 5px; overflow-x: auto; min-width: 0; flex: 1; padding: 2px 0; }
+.timeline-event-active { border-color: var(--accent); background: var(--accent-dim); }
+.timeline-events-empty { color: var(--text-muted); font-size: 10px; }
 
 .timeline-toolbar-label {
   font-size: 10px;
@@ -501,6 +570,7 @@ const timelineStyles = `
 }
 .track-label:hover { background: var(--bg-elevated); }
 .track-label-selected { background: var(--accent-dim) !important; color: var(--text-primary); }
+.track-label-hidden { opacity: .5; }
 
 .timeline-scroll-area {
   flex: 1;
@@ -588,6 +658,9 @@ const timelineStyles = `
 }
 .timeline-track:hover { background: var(--bg-elevated); }
 .timeline-track-selected { background: var(--accent-dim) !important; }
+.group-entrance-marker { position: absolute; top: 8px; z-index: 3; width: 9px; height: 9px; padding: 0; border-radius: 50%; border: 1px solid #08121b; background: #ffb84a; transform: translateX(-50%); cursor: pointer; }
+.group-entrance-marker:hover, .group-entrance-marker:focus-visible { outline: 2px solid #ffb84a; outline-offset: 2px; }
+.timeline-track-hidden .track-bar { opacity: .35; }
 
 .track-bar-area {
   position: relative;
@@ -600,7 +673,7 @@ const timelineStyles = `
   top: 4px;
   bottom: 4px;
   background: var(--accent);
-  opacity: 0.35;
+  opacity: 0.5;
   border-radius: 3px;
   min-width: 4px;
   display: flex;
@@ -608,6 +681,10 @@ const timelineStyles = `
   padding: 0 6px;
   overflow: visible;
 }
+.track-type-text .track-bar { background: #FF2E93; opacity: .68; }
+.track-type-effect .track-bar { background: #22D3EE; opacity: .46; }
+.track-type-shape .track-bar { background: #62626a; opacity: .45; }
+.track-type-image .track-bar { background: #2F6BFF; opacity: .56; }
 
 .track-bar-label {
   font-size: 9px;
@@ -619,16 +696,16 @@ const timelineStyles = `
 }
 
 .timeline-track-selected .track-bar {
-  opacity: 0.6;
+  opacity: .92;
 }
 
 .kf-diamond {
   position: absolute;
   top: 50%;
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   transform: translate(-50%, -50%) rotate(45deg);
-  background: var(--bg-secondary);
+  padding: 0;
   border: 2px solid #FFD700;
   cursor: grab;
   z-index: 3;
@@ -636,7 +713,7 @@ const timelineStyles = `
   pointer-events: auto;
 }
 .kf-diamond:hover {
-  background: #FFD700;
+  outline: 2px solid white;
 }
 
 .kf-context-menu {

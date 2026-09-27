@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "video": "node cli/video-studio.mjs",
+    "test:cli": "node --test tests/cli/*.test.mjs",
+    "test": "vitest run && node --test tests/cli/*.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

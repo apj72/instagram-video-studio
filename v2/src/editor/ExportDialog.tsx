@@ -11,7 +11,7 @@ interface ExportDialogProps {
 }
 
 export function ExportDialog({ assets, onClose }: ExportDialogProps) {
-  const [preset, setPreset] = useState<ExportPreset>(EXPORT_PRESETS[0]);
+  const [preset, setPreset] = useState<ExportPreset>(project.value.exportPreset ?? EXPORT_PRESETS[0]);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [exporting, setExporting] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -26,6 +26,9 @@ export function ExportDialog({ assets, onClose }: ExportDialogProps) {
       if (hasWebCodecs) {
         blob = await exportMp4(project.value, assets, preset, setProgress, abortRef.current.signal);
       } else {
+        if (project.value.audio.assetId && !project.value.audio.muted) {
+          throw new Error('Audio export requires a browser with WebCodecs audio and video support.');
+        }
         blob = await exportFallback(project.value, assets, setProgress);
       }
 

@@ -1,14 +1,21 @@
 import { signal } from '@preact/signals';
 import type { AudioRenderData } from '../render/engine.ts';
+import { flacDurationMs } from './flac.ts';
+import { audibleEndMs } from './trailingSilence.ts';
 
 export const audioLoaded = signal(false);
 export const detectedBpm = signal<number | null>(null);
+export const audioLoadError = signal('');
 
 let audioContext: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
 let sourceNode: AudioBufferSourceNode | null = null;
 let gainNode: GainNode | null = null;
 let audioBuffer: AudioBuffer | null = null;
+let audioFile: File | null = null;
+let sourceDurationMs = 0;
+let audibleDurationMs = 0;
+let loadedAssetId: string | null = null;
 let startOffset = 0;
 let isPlaying = false;
 
@@ -19,11 +26,46 @@ function getContext(): AudioContext {
   return audioContext;
 }
 
-export async function loadAudioFile(file: File): Promise<void> {
+async function decodeFile(ctx: AudioContext, file: File): Promise<AudioBuffer> {
+  try {
+    return await ctx.decodeAudioData(await file.arrayBuffer());
+  } catch (originalError) {
+    if (!/\.flac$/i.test(file.name)) throw originalError;
+    let response: Response;
+    try {
+      response = await fetch('/api/audio/convert-flac', {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/flac' },
+        body: file,
+      });
+    } catch {
+      throw new Error('This browser could not decode FLAC, and the local FLAC converter is unavailable.');
+    }
+    if (!response.ok) {
+      if (response.status === 404) throw new Error('This browser could not decode FLAC. Open the app through its local Vite server for FLAC conversion.');
+      throw new Error(await response.text() || 'FLAC conversion failed.');
+    }
+    return ctx.decodeAudioData(await response.arrayBuffer());
+  }
+}
+
+export async function loadAudioFile(file: File, assetId: string | null = null): Promise<void> {
   const ctx = getContext();
-  const arrayBuffer = await file.arrayBuffer();
-  audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-  audioLoaded.value = true;
+  const decoded = await decodeFile(ctx, file);
+  const exactFlacDuration = /\.flac$/i.test(file.name)
+    ? flacDurationMs(new Uint8Array(await file.slice(0, 42).arrayBuffer()))
+    : null;
+  stopAudio();
+  gainNode?.disconnect();
+  analyserNode?.disconnect();
+  audioBuffer = decoded;
+  audioFile = file;
+  sourceDurationMs = exactFlacDuration ?? decoded.duration * 1000;
+  audibleDurationMs = audibleEndMs(
+    Array.from({ length: decoded.numberOfChannels }, (_, channel) => decoded.getChannelData(channel)),
+    decoded.sampleRate, sourceDurationMs,
+  );
+  loadedAssetId = assetId;
 
   analyserNode = ctx.createAnalyser();
   analyserNode.fftSize = 256;
@@ -33,7 +75,28 @@ export async function loadAudioFile(file: File): Promise<void> {
   gainNode.connect(analyserNode);
   analyserNode.connect(ctx.destination);
 
-  detectedBpm.value = detectBpm(audioBuffer);
+  detectedBpm.value = detectBpm(decoded);
+  audioLoadError.value = '';
+  audioLoaded.value = true;
+}
+
+export function getAudioFile(): File | null { return audioFile; }
+export function getLoadedAudioAssetId(): string | null { return loadedAssetId; }
+
+export function clearAudio(): void {
+  stopAudio();
+  gainNode?.disconnect();
+  analyserNode?.disconnect();
+  gainNode = null;
+  analyserNode = null;
+  audioBuffer = null;
+  audioFile = null;
+  sourceDurationMs = 0;
+  audibleDurationMs = 0;
+  loadedAssetId = null;
+  detectedBpm.value = null;
+  audioLoadError.value = '';
+  audioLoaded.value = false;
 }
 
 export function playAudio(fromMs: number = 0): void {
@@ -46,6 +109,7 @@ export function playAudio(fromMs: number = 0): void {
   sourceNode.connect(gainNode!);
 
   startOffset = fromMs / 1000;
+  if (startOffset >= audioBuffer.duration) { sourceNode = null; return; }
   sourceNode.start(0, startOffset);
   isPlaying = true;
 
@@ -119,7 +183,11 @@ export function getAudioBuffer(): AudioBuffer | null {
 }
 
 export function getAudioDuration(): number {
-  return audioBuffer ? audioBuffer.duration * 1000 : 0;
+  return sourceDurationMs;
+}
+
+export function getAudioAudibleDuration(): number {
+  return audibleDurationMs;
 }
 
 function detectBpm(buffer: AudioBuffer): number {

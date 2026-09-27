@@ -319,6 +319,14 @@ export function importV1Config(v1: V1Config): { project: Project; assets: Array<
       backgroundColor: bgColor,
       backgroundImageAssetId: null,
       seed: 42,
+      border: {
+        enabled: v1.border?.enabled ?? false,
+        thickness: v1.border?.thickness ?? 4,
+        color: v1.border?.color ?? '#E8423F',
+        cornerRadius: v1.border?.cornerRadius ?? 0,
+        inset: v1.border?.inset ?? 40,
+        outerBlur: v1.border?.outerBlur ?? 0,
+      },
     },
     layers,
     audio: {

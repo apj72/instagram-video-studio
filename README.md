@@ -1,5 +1,7 @@
 # VERSION 1 - Animated Logo
 
+For AI assisted, command line post video generation in V2, see [the JSON video guide](v2/docs/CLI_VIDEO_GENERATION.md).
+
 Animated logo visuals for the **VERSION 1** DJ collective, designed for Instagram portrait format (1080x1920).
 
 ## Features

@@ -2,7 +2,7 @@ import { Output, Mp4OutputFormat, BufferTarget, CanvasSource, AudioBufferSource,
 import type { Project } from '../core/schema.ts';
 import type { ExportPreset } from '../core/schema.ts';
 import { renderFrame } from '../render/engine.ts';
-import { getAudioBuffer } from '../audio/analyser.ts';
+import { getAudioBuffer, getLoadedAudioAssetId } from '../audio/analyser.ts';
 
 export interface ExportProgress {
   phase: 'encoding' | 'muxing-audio' | 'finalizing' | 'done' | 'error';
@@ -47,19 +47,23 @@ export async function exportMp4(
   const frameDuration = 1 / fps;
 
   const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d');
+  // H.264 output is SDR; convert wide-gamut photos to sRGB before encoding.
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
   if (!ctx) throw new Error('Failed to create OffscreenCanvas 2D context');
 
   const target = new BufferTarget();
 
   const videoSource = new CanvasSource(canvas, {
-    codec: preset.codec as 'avc',
-    quality: QUALITY_HIGH,
+    codec: 'avc',
+    bitrate: preset.bitrate,
     keyFrameInterval: 2,
   });
 
   const audioBuffer = getAudioBuffer();
-  const hasAudio = audioBuffer !== null && !project.audio.muted;
+  if (project.audio.assetId && (getLoadedAudioAssetId() !== project.audio.assetId || !audioBuffer)) {
+    throw new Error('The audio file is not loaded. Choose it again in Audio before exporting.');
+  }
+  const hasAudio = !!project.audio.assetId && audioBuffer !== null && !project.audio.muted;
 
   let audioSource: AudioBufferSource | null = null;
   if (hasAudio) {
@@ -78,6 +82,7 @@ export async function exportMp4(
   if (audioSource) {
     output.addAudioTrack(audioSource);
   }
+  await output.start();
 
   for (let frame = 0; frame < totalFrames; frame++) {
     if (abortSignal?.aborted) {
@@ -89,7 +94,7 @@ export async function exportMp4(
 
     renderFrame(project, ctx as unknown as CanvasRenderingContext2D, timeMs, frameNumber, assets, null);
 
-    await videoSource.add(frame * frameDuration, frameDuration);
+    await videoSource.add(frame * frameDuration, Math.min(frameDuration, duration / 1000 - frame * frameDuration));
 
     if (frame % 10 === 0 || frame === totalFrames - 1) {
       onProgress({
@@ -161,7 +166,27 @@ export async function exportMp4(
     percent: 100,
   });
 
-  return new Blob([buffer], { type: 'video/mp4' });
+  const encoded = new Blob([buffer], { type: 'video/mp4' });
+  if (!hasAudio) return encoded;
+
+  let aligned: Response;
+  try {
+    aligned = await fetch('/api/video/align-duration', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'video/mp4',
+        'X-Target-Duration-Seconds': String(duration / 1000),
+      },
+      body: encoded,
+      signal: abortSignal,
+    });
+  } catch (cause) {
+    if (abortSignal?.aborted) throw cause;
+    throw new Error('Exact audio alignment requires the local server with FFmpeg.');
+  }
+  if (aligned.status === 404) throw new Error('Exact audio alignment requires the local server with FFmpeg.');
+  if (!aligned.ok) throw new Error(await aligned.text() || 'Could not align audio with the video duration.');
+  return aligned.blob();
 }
 
 export function downloadBlob(blob: Blob, filename: string) {
@@ -188,7 +213,7 @@ export async function exportFallback(
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
   if (!ctx) return null;
 
   const stream = canvas.captureStream(fps);

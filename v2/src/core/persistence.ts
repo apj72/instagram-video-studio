@@ -2,9 +2,10 @@ import { signal } from '@preact/signals';
 import type { Project } from './schema.ts';
 
 const DB_NAME = 'version1-studio';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const PROJECTS_STORE = 'projects';
 const ASSETS_STORE = 'assets';
+const LIBRARY_STORE = 'library';
 const AUTOSAVE_KEY = '__autosave__';
 
 export const savedProjects = signal<ProjectListEntry[]>([]);
@@ -30,6 +31,18 @@ interface StoredAsset {
   name: string;
 }
 
+export type LibraryKind = 'post' | 'template';
+export interface LibraryItem {
+  id: string;
+  kind: LibraryKind;
+  name: string;
+  project: Project;
+  thumbnail?: string;
+  assets: { id: string; blob: Blob; mimeType: string }[];
+  audio?: { blob: Blob; mimeType: string; name: string };
+  modifiedAt: string;
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -42,8 +55,34 @@ function openDb(): Promise<IDBDatabase> {
         const store = db.createObjectStore(ASSETS_STORE, { keyPath: 'id' });
         store.createIndex('projectId', 'projectId', { unique: false });
       }
+      if (!db.objectStoreNames.contains(LIBRARY_STORE)) {
+        db.createObjectStore(LIBRARY_STORE, { keyPath: 'id' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function saveLibraryItem(item: LibraryItem): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const t = tx(db, LIBRARY_STORE, 'readwrite');
+    t.objectStore(LIBRARY_STORE).put(item);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+}
+
+export async function listLibraryItems(kind: LibraryKind): Promise<LibraryItem[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const t = tx(db, LIBRARY_STORE, 'readonly');
+    const req = t.objectStore(LIBRARY_STORE).getAll();
+    req.onsuccess = () => resolve((req.result as LibraryItem[])
+      .filter(item => item.kind === kind)
+      .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)));
     req.onerror = () => reject(req.error);
   });
 }

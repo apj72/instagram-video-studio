@@ -1,12 +1,14 @@
 import type { Project, ImageLayer, TextLayer, EffectLayer, ShapeLayer } from '../core/schema.ts';
 import { INSTAGRAM_SAFE_AREAS, EXPORT_PRESETS, SCHEMA_VERSION, generateId } from '../core/schema.ts';
 import type { AnimatedProperty } from '../core/schema.ts';
+import { TONY_TEMPLATES } from './tonyBrand.ts';
 
 export interface Template {
   id: string;
   name: string;
   description: string;
   category: string;
+  preview?: string;
   factory: () => Project;
 }
 
@@ -43,6 +45,7 @@ function baseSettings(duration = 16000, bpm = 124) {
     backgroundColor: '#000000',
     backgroundImageAssetId: null,
     seed: Math.floor(Math.random() * 999999),
+    border: { enabled: false, thickness: 4, color: '#E8423F', cornerRadius: 0, inset: 40, outerBlur: 0 },
   };
 }
 
@@ -104,6 +107,7 @@ function effectLayer(name: string, effectType: EffectLayer['effectType'], dur: n
 }
 
 export const TEMPLATES: Template[] = [
+  ...TONY_TEMPLATES,
   {
     id: 'dj-lineup',
     name: 'DJ Line-Up',

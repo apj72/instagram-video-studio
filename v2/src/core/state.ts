@@ -1,12 +1,18 @@
 import { signal, computed } from '@preact/signals';
 import type { Project, Layer } from './schema.ts';
 import { createDefaultProject } from './schema.ts';
+import { createLayerGroup } from './groups.ts';
 
 export const project = signal<Project>(createDefaultProject());
 export const selectedLayerId = signal<string | null>(null);
+export const selectedLayerIds = signal<string[]>([]);
 export const currentTime = signal(0);
 export const isPlaying = signal(false);
 export const zoom = signal(1);
+export const showLabels = signal(false);
+export const autoKeyframe = signal(false);
+export interface LibrarySource { kind: 'post' | 'template'; id: string; name: string; }
+export const librarySource = signal<LibrarySource | null>(null);
 
 export const selectedLayer = computed<Layer | null>(() => {
   const id = selectedLayerId.value;
@@ -39,11 +45,27 @@ export function addLayer(layer: Layer) {
 export function removeLayer(layerId: string) {
   updateProject(p => ({
     ...p,
-    layers: p.layers.filter(l => l.id !== layerId),
+    layers: p.layers.filter(l => l.id !== layerId).map(l => l.type === 'group'
+      ? { ...l, children: l.children.filter(id => id !== layerId) } : l),
   }));
+  selectedLayerIds.value = selectedLayerIds.value.filter(id => id !== layerId);
   if (selectedLayerId.value === layerId) {
     selectedLayerId.value = null;
   }
+}
+
+export function groupSelectedLayers() {
+  const result = createLayerGroup(project.value, selectedLayerIds.value);
+  if (!result.group) return false;
+  project.value = result.project;
+  selectedLayerIds.value = [];
+  selectedLayerId.value = result.group.id;
+  return true;
+}
+
+export function ungroupLayer(groupId: string) {
+  if (project.value.layers.find(layer => layer.id === groupId)?.type !== 'group') return;
+  removeLayer(groupId);
 }
 
 export function reorderLayers(fromIndex: number, toIndex: number) {
@@ -55,9 +77,11 @@ export function reorderLayers(fromIndex: number, toIndex: number) {
   });
 }
 
-export function loadProject(p: Project) {
+export function loadProject(p: Project, source: LibrarySource | null = null) {
   project.value = p;
+  librarySource.value = source;
   selectedLayerId.value = null;
+  selectedLayerIds.value = [];
   currentTime.value = 0;
   isPlaying.value = false;
 }

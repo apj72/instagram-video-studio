@@ -2,6 +2,7 @@ import type { Project, ImageLayer, TextLayer, EffectLayer, ShapeLayer } from '..
 import { INSTAGRAM_SAFE_AREAS, EXPORT_PRESETS, SCHEMA_VERSION, generateId } from '../core/schema.ts';
 import type { AnimatedProperty } from '../core/schema.ts';
 import { TONY_TEMPLATES } from './tonyBrand.ts';
+import { VERSION1_TEMPLATES } from './version1Events.ts';
 
 export interface Template {
   id: string;
@@ -107,6 +108,7 @@ function effectLayer(name: string, effectType: EffectLayer['effectType'], dur: n
 }
 
 export const TEMPLATES: Template[] = [
+  ...VERSION1_TEMPLATES,
   ...TONY_TEMPLATES,
   {
     id: 'dj-lineup',

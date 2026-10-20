@@ -2,6 +2,7 @@ import type { GroupLayer, Layer } from '../../core/schema.ts';
 import { getAsset } from '../../core/assets.ts';
 import { evaluateProperty } from '../../timeline/interpolation.ts';
 import { getGroupEntranceOffset } from '../../render/groupMotion.ts';
+import { textBoxLeft } from '../../render/textBox.ts';
 
 export interface LayerBounds { x: number; y: number; width: number; height: number }
 
@@ -55,9 +56,7 @@ export function getLayerBounds(layer: Layer, timeMs: number, canvas: HTMLCanvasE
     const effectPad = layer.headlineEffect ? layer.headlineEffect.outlineWidth + layer.headlineEffect.offset * 2 : 0;
     const boxWidth = textWidth + padX * 2 + effectPad * 2;
     const boxHeight = lines.length * fontSize * layer.lineHeight + padY * 2 + effectPad * 2;
-    const x = layer.textAlign === 'left' ? cx - padX - effectPad
-      : layer.textAlign === 'right' ? cx - boxWidth + padX + effectPad
-        : cx - boxWidth / 2;
+    const x = textBoxLeft(layer.textAlign, cx, boxWidth, padX + effectPad);
     return { x, y: cy - boxHeight / 2, width: boxWidth, height: boxHeight };
   }
 

@@ -2,6 +2,7 @@ import { Output, Mp4OutputFormat, BufferTarget, CanvasSource, AudioBufferSource,
 import type { Project } from '../core/schema.ts';
 import type { ExportPreset } from '../core/schema.ts';
 import { renderFrame } from '../render/engine.ts';
+import { seekVideoAssets } from '../render/videoSync.ts';
 import { getAudioBuffer, getLoadedAudioAssetId } from '../audio/analyser.ts';
 
 export interface ExportProgress {
@@ -92,6 +93,9 @@ export async function exportMp4(
     const timeMs = (frame / fps) * 1000;
     const frameNumber = frame;
 
+    // Park video layers on this exact frame; left to play freely they barely advance,
+    // because frames render far faster than real time.
+    await seekVideoAssets(project, assets, timeMs);
     renderFrame(project, ctx as unknown as CanvasRenderingContext2D, timeMs, frameNumber, assets, null);
 
     await videoSource.add(frame * frameDuration, Math.min(frameDuration, duration / 1000 - frame * frameDuration));

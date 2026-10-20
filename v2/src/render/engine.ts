@@ -2,6 +2,7 @@ import type { Project, Layer, ImageLayer, TextLayer, VideoLayer, ShapeLayer, Eff
 import { evaluateProperty } from '../timeline/interpolation.ts';
 import { frameRNG } from '../core/random.ts';
 import { drawHeadlineLine } from './textEffects.ts';
+import { textBoxLeft } from './textBox.ts';
 import { DEFAULT_LASER_COLORS, DEFAULT_LASER_SPEED, DEFAULT_LASER_SWEEP, getLaserBeamPath } from './laserMotion.ts';
 import type { LaserOrigin } from './laserMotion.ts';
 import { getBackgroundSlideOffset } from './backgroundMotion.ts';
@@ -65,9 +66,8 @@ export function renderFrame(project: Project, ctx: CanvasRenderingContext2D, tim
   const { width, height, duration, bpm, seed, backgroundColor, backgroundImageAssetId } = project.settings;
   const t = timeMs / duration;
 
-  let masterAlpha = 1;
-  if (t < 0.05) masterAlpha = t / 0.05;
-  else if (t > 0.95) masterAlpha = (1 - t) / 0.05;
+  const fadeMs = project.settings.masterFadeMs ?? duration * 0.05;
+  let masterAlpha = fadeMs > 0 ? Math.min(timeMs / fadeMs, (duration - timeMs) / fadeMs, 1) : 1;
   masterAlpha = Math.max(0, Math.min(1, masterAlpha));
 
   let instrAlpha = 1;
@@ -244,7 +244,7 @@ function renderTextLayer(rc: RenderContext, layer: TextLayer, px: number, py: nu
     const radius = layer.background.enabled ? layer.background.cornerRadius : layer.border.cornerRadius;
     const boxW = maxW + padX * 2;
     const boxH = totalH + padY * 2;
-    const boxX = textX - boxW / 2;
+    const boxX = textBoxLeft(layer.textAlign, textX, boxW, padX);
     const boxY = textY - totalH / 2 - padY;
 
     if (layer.background.enabled) {

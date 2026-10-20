@@ -2,9 +2,10 @@ import { useRef, useEffect, useCallback, useState } from 'preact/hooks';
 import { project, currentTime, isPlaying, showLabels, selectedLayerId } from '../core/state.ts';
 import { createPreviewClock } from '../core/clock.ts';
 import { renderFrame, renderLabels } from '../render/engine.ts';
+import { followVideoAssets } from '../render/videoSync.ts';
 import { importV1Config } from '../core/migration.ts';
 import { loadProject } from '../core/state.ts';
-import { playAudio, stopAudio, seekAudio, getAudioRenderData, audioLoaded, audioLoadError, clearAudio, getLoadedAudioAssetId, loadAudioFile, setVolume } from '../audio/analyser.ts';
+import { playAudio, stopAudio, seekAudio, getAudioRenderData, audioLoaded, audioLoadError, clearAudio, getLoadedAudioAssetId, loadAudioFile, setVolume, setAudioLoop, isAudioNativeLooping, setAudioPlaybackRate } from '../audio/analyser.ts';
 import { initKeyboardShortcuts } from '../core/commands.ts';
 import { startAutosave, stopAutosave, loadAsset } from '../core/persistence.ts';
 import { generateId } from '../core/schema.ts';
@@ -19,6 +20,7 @@ import { SaveLibraryDialog } from './SaveLibraryDialog.tsx';
 import { CanvasViewport } from './canvas/CanvasViewport.tsx';
 import { getAssetMap, registerAsset } from '../core/assets.ts';
 import { TONY_BRAND_ASSETS } from '../templates/tonyBrand.ts';
+import { VERSION1_ASSETS } from '../templates/version1Events.ts';
 
 const previewClock = createPreviewClock(16000);
 
@@ -27,16 +29,22 @@ const SPEED_OPTIONS = [0.25, 0.5, 1, 2] as const;
 export function Shell() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
-  const lastPreviewTimeRef = useRef(0);
   const [showExport, setShowExport] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showConfigs, setShowConfigs] = useState(false);
   const [showPosts, setShowPosts] = useState(false);
   const [showSave, setShowSave] = useState(false);
-  const [looping, setLooping] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const [looping, setLooping] = useState(previewClock.loop);
+  const [speed, setSpeed] = useState(previewClock.rate);
 
   const projectIdRef = useRef(generateId());
+
+  const handleToggleLoop = useCallback(() => {
+    const next = !previewClock.loop;
+    previewClock.setLoop(next);
+    setAudioLoop(next, project.value.settings.duration);
+    setLooping(next);
+  }, []);
 
   useEffect(() => {
     const logo = new Image();
@@ -45,7 +53,18 @@ export function Shell() {
       registerAsset('default-logo', logo);
       drawFrame(0);
     };
-    for (const asset of TONY_BRAND_ASSETS) {
+    for (const asset of [...TONY_BRAND_ASSETS, ...VERSION1_ASSETS]) {
+      if ('kind' in asset && asset.kind === 'video') {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.loop = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        video.crossOrigin = 'anonymous';
+        video.onloadeddata = () => { registerAsset(asset.id, video); drawFrame(currentTime.value); };
+        video.src = asset.url;
+        continue;
+      }
       const image = new Image();
       image.onload = () => { registerAsset(asset.id, image); drawFrame(currentTime.value); };
       image.src = asset.url;
@@ -100,8 +119,7 @@ export function Shell() {
       }
       if (e.key === 'l' || e.key === 'L') {
         e.preventDefault();
-        previewClock.setLoop(!previewClock.loop);
-        setLooping(previewClock.loop);
+        handleToggleLoop();
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
@@ -114,7 +132,7 @@ export function Shell() {
       stopAutosave();
       document.removeEventListener('keydown', handleGlobalKeys);
     };
-  }, []);
+  }, [handleToggleLoop]);
 
   const drawFrame = useCallback((timeMs: number) => {
     const canvas = canvasRef.current;
@@ -124,6 +142,7 @@ export function Shell() {
     const p = project.value;
     const frameNumber = Math.floor(timeMs / (1000 / p.settings.fps));
     const audioData = audioLoaded.value ? getAudioRenderData() : null;
+    followVideoAssets(p, getAssetMap(), timeMs, isPlaying.value);
     renderFrame(p, ctx, timeMs, frameNumber, getAssetMap(), audioData);
     if (showLabels.value) renderLabels(p, ctx, timeMs);
   }, []);
@@ -169,10 +188,11 @@ export function Shell() {
 
   useEffect(() => {
     previewClock.onTick = (timeMs: number) => {
-      if (timeMs < lastPreviewTimeRef.current && isPlaying.value && audioLoaded.value) playAudio(0);
-      lastPreviewTimeRef.current = timeMs;
       currentTime.value = timeMs;
       drawFrame(timeMs);
+    };
+    previewClock.onLoop = () => {
+      if (audioLoaded.value && !isAudioNativeLooping()) playAudio(0);
     };
 
     function loop() {
@@ -186,18 +206,21 @@ export function Shell() {
     return () => {
       cancelAnimationFrame(rafRef.current);
       previewClock.onTick = null;
+      previewClock.onLoop = null;
     };
   }, [drawFrame]);
 
   useEffect(() => {
     if (isPlaying.value) {
       previewClock.start();
-      if (audioLoaded.value) playAudio(currentTime.value);
+      const startTime = previewClock.currentTime;
+      currentTime.value = startTime;
+      if (audioLoaded.value) playAudio(startTime);
     } else {
       previewClock.stop();
       if (audioLoaded.value) stopAudio();
     }
-  }, [isPlaying.value]);
+  }, [isPlaying.value, audioLoaded.value]);
 
   useEffect(() => {
     const dur = project.value.settings.duration;
@@ -205,6 +228,7 @@ export function Shell() {
       previewClock.setDuration(dur);
       previewClock.seek(0);
     }
+    setAudioLoop(previewClock.loop, dur);
   }, [project.value.settings.duration]);
 
   useEffect(() => {
@@ -256,7 +280,6 @@ export function Shell() {
   }, []);
 
   const handleSeek = useCallback((timeMs: number) => {
-    lastPreviewTimeRef.current = timeMs;
     currentTime.value = timeMs;
     previewClock.seek(timeMs);
     if (audioLoaded.value) seekAudio(timeMs);
@@ -285,17 +308,10 @@ export function Shell() {
     handleSeek(Math.min(project.value.settings.duration, currentTime.value + frameDur));
   }, [handleSeek]);
 
-  const handleToggleLoop = useCallback(() => {
-    setLooping(prev => {
-      const next = !prev;
-      previewClock.setLoop(next);
-      return next;
-    });
-  }, []);
-
   const handleSpeedChange = useCallback((newSpeed: number) => {
     setSpeed(newSpeed);
     previewClock.setRate(newSpeed);
+    setAudioPlaybackRate(newSpeed);
   }, []);
 
   const handleSave = useCallback(() => setShowSave(true), []);
@@ -335,6 +351,13 @@ export function Shell() {
               </button>
               <button class="transport-btn" onClick={handleFrameForward} title="Frame forward (→)">|▶</button>
               <button class="transport-btn" onClick={handleSkipToEnd} title="Skip to end (End)">⏭</button>
+              <button
+                class={`transport-btn transport-btn-loop ${looping ? 'transport-btn-active' : ''}`}
+                onClick={handleToggleLoop}
+                title="Loop video and audio (L)"
+                aria-label="Loop playback"
+                aria-pressed={looping}
+              >↻ Loop</button>
             </div>
             <span class="transport-time">
               {formatTime(currentTime.value)} / {formatTime(project.value.settings.duration)}
@@ -348,11 +371,6 @@ export function Shell() {
               value={currentTime.value}
               onInput={(e) => handleSeek(parseInt((e.target as HTMLInputElement).value))}
             />
-            <button
-              class={`transport-btn transport-btn-toggle ${looping ? 'transport-btn-active' : ''}`}
-              onClick={handleToggleLoop}
-              title="Loop playback (L)"
-            >↻</button>
             <select
               class="transport-speed"
               value={speed}
@@ -457,9 +475,7 @@ const shellStyles = `
 }
 .transport-btn-play:hover { background: var(--accent-hover); }
 
-.transport-btn-toggle {
-  font-size: 14px;
-}
+.transport-btn-loop { width: auto; padding: 0 9px; gap: 4px; font-size: 11px; font-weight: 650; }
 
 .transport-btn-active {
   background: var(--accent) !important;

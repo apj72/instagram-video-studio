@@ -45,6 +45,7 @@ export interface PreviewClockExt extends PreviewClock {
   readonly rate: number;
   readonly loop: boolean;
   onEnd: (() => void) | null;
+  onLoop: (() => void) | null;
 }
 
 export function createPreviewClock(initialDurationMs: number): PreviewClockExt {
@@ -57,14 +58,17 @@ export function createPreviewClock(initialDurationMs: number): PreviewClockExt {
   let looping = false;
   let onTick: ((timeMs: number) => void) | null = null;
   let onEnd: (() => void) | null = null;
+  let onLoop: (() => void) | null = null;
 
   function tick(timestamp: number) {
     if (!playing) return;
     const elapsed = (timestamp - startTimestamp) * rate;
     if (elapsed >= dur) {
       if (looping) {
-        startTimestamp = timestamp;
-        onTick?.(0);
+        const wrapped = elapsed % dur;
+        startTimestamp = timestamp - wrapped / rate;
+        onLoop?.();
+        onTick?.(wrapped);
       } else {
         playing = false;
         pausedAt = dur;
@@ -92,6 +96,8 @@ export function createPreviewClock(initialDurationMs: number): PreviewClockExt {
     set onTick(fn) { onTick = fn; },
     get onEnd() { return onEnd; },
     set onEnd(fn) { onEnd = fn; },
+    get onLoop() { return onLoop; },
+    set onLoop(fn) { onLoop = fn; },
 
     setDuration(ms: number) {
       dur = ms;

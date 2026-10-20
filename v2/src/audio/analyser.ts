@@ -18,6 +18,36 @@ let audibleDurationMs = 0;
 let loadedAssetId: string | null = null;
 let startOffset = 0;
 let isPlaying = false;
+let audioLoopEnabled = false;
+let audioLoopDurationMs = 0;
+let audioPlaybackRate = 1;
+
+function nativeLoopEndSeconds(): number | null {
+  if (!audioLoopEnabled || !audioBuffer || audioLoopDurationMs <= 0) return null;
+  const end = audioLoopDurationMs / 1000;
+  // The audio cannot fill a longer video seamlessly. Let the visual clock restart it instead.
+  return end <= audioBuffer.duration + 0.002 ? Math.min(end, audioBuffer.duration) : null;
+}
+
+export function setAudioLoop(enabled: boolean, durationMs: number): void {
+  audioLoopEnabled = enabled;
+  audioLoopDurationMs = durationMs;
+  if (sourceNode) {
+    const end = nativeLoopEndSeconds();
+    sourceNode.loopStart = 0;
+    sourceNode.loopEnd = end ?? 0;
+    sourceNode.loop = end !== null;
+  }
+}
+
+export function isAudioNativeLooping(): boolean {
+  return Boolean(sourceNode?.loop);
+}
+
+export function setAudioPlaybackRate(rate: number): void {
+  audioPlaybackRate = rate;
+  if (sourceNode) sourceNode.playbackRate.value = rate;
+}
 
 function getContext(): AudioContext {
   if (!audioContext) {
@@ -106,21 +136,39 @@ export function playAudio(fromMs: number = 0): void {
   const ctx = getContext();
   sourceNode = ctx.createBufferSource();
   sourceNode.buffer = audioBuffer;
+  sourceNode.playbackRate.value = audioPlaybackRate;
   sourceNode.connect(gainNode!);
 
+  const loopEnd = nativeLoopEndSeconds();
+  if (loopEnd !== null) {
+    sourceNode.loopStart = 0;
+    sourceNode.loopEnd = loopEnd;
+    sourceNode.loop = true;
+  }
+
   startOffset = fromMs / 1000;
-  if (startOffset >= audioBuffer.duration) { sourceNode = null; return; }
+  if (startOffset >= audioBuffer.duration) { sourceNode.disconnect(); sourceNode = null; return; }
+  void ctx.resume();
   sourceNode.start(0, startOffset);
   isPlaying = true;
 
-  sourceNode.onended = () => { isPlaying = false; };
+  const startedNode = sourceNode;
+  sourceNode.onended = () => {
+    if (sourceNode === startedNode) {
+      sourceNode = null;
+      isPlaying = false;
+      startedNode.disconnect();
+    }
+  };
 }
 
 export function stopAudio(): void {
-  if (sourceNode && isPlaying) {
-    sourceNode.stop();
-    sourceNode.disconnect();
+  if (sourceNode) {
+    const stoppedNode = sourceNode;
     sourceNode = null;
+    stoppedNode.onended = null;
+    if (isPlaying) stoppedNode.stop();
+    stoppedNode.disconnect();
   }
   isPlaying = false;
 }

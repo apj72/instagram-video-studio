@@ -1,10 +1,12 @@
-import { useRef, useCallback, useEffect, useState } from 'preact/hooks';
+import { useRef, useCallback, useEffect, useLayoutEffect, useState } from 'preact/hooks';
+import { createPortal } from 'preact/compat';
 import { signal } from '@preact/signals';
 import { project, currentTime, selectedLayerId, selectedLayerIds, zoom, updateLayer } from '../../core/state.ts';
 import { getGroupForLayer } from '../../core/groups.ts';
 import { evaluateProperty } from '../../timeline/interpolation.ts';
 import { getLayerEvents, getVisibleSpan } from '../../timeline/events.ts';
 import type { Layer, AnimatedProperty, EasingType, Keyframe } from '../../core/schema.ts';
+import { fitPopoverToViewport } from './popoverPosition.ts';
 
 interface TimelinePanelProps {
   onSeek: (timeMs: number) => void;
@@ -68,6 +70,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
   const rulerRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
   const trackLabelsRef = useRef<HTMLDivElement>(null);
+  const easingMenuRef = useRef<HTMLDivElement>(null);
   const [showBeats, setShowBeats] = useState(false);
   const [draggingKf, setDraggingKf] = useState<{
     layerId: string;
@@ -76,6 +79,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     startX: number;
     origTime: number;
   } | null>(null);
+
   const [easingMenu, setEasingMenu] = useState<{
     layerId: string;
     path: string[];
@@ -83,6 +87,22 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     x: number;
     y: number;
   } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!easingMenu) return;
+    const placeMenu = () => {
+      const menu = easingMenuRef.current;
+      if (!menu) return;
+      const size = menu.getBoundingClientRect();
+      const position = fitPopoverToViewport(easingMenu, size, { width: window.innerWidth, height: window.innerHeight });
+      menu.style.left = `${position.x}px`;
+      menu.style.top = `${position.y}px`;
+      menu.style.visibility = 'visible';
+    };
+    placeMenu();
+    window.addEventListener('resize', placeMenu);
+    return () => window.removeEventListener('resize', placeMenu);
+  }, [easingMenu]);
 
   const totalWidth = z * 100;
   const playheadPct = dur > 0 ? (time / dur) * 100 : 0;
@@ -379,11 +399,10 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
         </div>
       </div>
 
-      {easingMenu && (
-        <div
-          class="kf-context-menu"
-          style={{ left: `${easingMenu.x}px`, top: `${easingMenu.y}px` }}
-        >
+      {easingMenu && createPortal(<>
+        <div class="kf-menu-backdrop" onClick={() => setEasingMenu(null)} />
+        <div ref={easingMenuRef} class="kf-context-menu" role="menu" aria-label="Keyframe easing"
+          style={{ left: `${easingMenu.x}px`, top: `${easingMenu.y}px`, visibility: 'hidden' }}>
           <div class="kf-menu-header">Easing</div>
           {EASING_OPTIONS.map(easing => (
             <button
@@ -402,10 +421,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
             Delete keyframe
           </button>
         </div>
-      )}
-      {easingMenu && (
-        <div class="kf-menu-backdrop" onClick={() => setEasingMenu(null)} />
-      )}
+      </>, document.body)}
 
       <style>{timelineStyles}</style>
     </div>
@@ -724,6 +740,9 @@ const timelineStyles = `
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   z-index: 100;
   min-width: 140px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
   padding: 4px 0;
 }
 

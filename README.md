@@ -2,6 +2,8 @@
 
 For AI assisted, command line post video generation in V2, see [the JSON video guide](v2/docs/CLI_VIDEO_GENERATION.md).
 
+For the V2 visual editor, templates, timeline, audio, saving, and export, open the [illustrated HTML user guide](v2/docs/USER_GUIDE.html).
+
 Animated logo visuals for the **VERSION 1** DJ collective, designed for Instagram portrait format (1080x1920).
 
 ## Features

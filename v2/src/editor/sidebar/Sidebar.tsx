@@ -1305,6 +1305,7 @@ function ShapeProperties({ layer }: { layer: ShapeLayer }) {
 }
 
 function VideoProperties({ layer }: { layer: VideoLayer }) {
+  const canvasHeight = project.value.settings.height;
   const handleVideoUpload = () => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -1330,6 +1331,17 @@ function VideoProperties({ layer }: { layer: VideoLayer }) {
           {layer.assetId ? 'Change Video' : 'Upload Video'}
         </button>
       </PropertyRow>
+      <PropertyRow label="Background">
+        <button class="prop-upload-btn" onClick={() => updateLayer(layer.id, current => ({
+          ...current,
+          orientation: 'horizontal',
+          thickness: canvasHeight,
+          position: {
+            ...current.position,
+            y: { keyframes: current.position.y.keyframes.map(frame => ({ ...frame, value: 0.5 })) },
+          },
+        }))}>Fill canvas</button>
+      </PropertyRow>
       <PropertyRow label="Orient">
         <select value={layer.orientation}
           onChange={(e) => updateLayer(layer.id, l => ({ ...l, orientation: (e.target as HTMLSelectElement).value as 'horizontal' | 'vertical' }))}>
@@ -1338,7 +1350,7 @@ function VideoProperties({ layer }: { layer: VideoLayer }) {
         </select>
       </PropertyRow>
       <PropertyRow label="Thick">
-        <input type="range" min="50" max="1000" step="10" value={layer.thickness}
+        <input type="range" min="50" max={Math.max(1000, canvasHeight)} step="10" value={layer.thickness}
           onInput={(e) => updateLayer(layer.id, l => ({ ...l, thickness: parseInt((e.target as HTMLInputElement).value) }))} />
         <span class="prop-unit">{layer.thickness}px</span>
       </PropertyRow>

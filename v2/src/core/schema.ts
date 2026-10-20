@@ -237,6 +237,8 @@ export interface ProjectSettings {
     duration: number;
   };
   seed: number;
+  /** Master fade at both ends; omitted preserves the original 5% fade. */
+  masterFadeMs?: number;
   border: FrameBorder;
 }
 

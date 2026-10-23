@@ -13,6 +13,16 @@ dist-ssr
 out
 *.local
 
+# User-selected media working folders and generated post previews/exports
+**/input-media/
+**/output-media/
+/media/input/
+/media/output/
+/posts/**/thumbnail.jpg
+/posts/**/contact-sheet.jpg
+/posts/**/*.mp4
+/.playwright-mcp/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

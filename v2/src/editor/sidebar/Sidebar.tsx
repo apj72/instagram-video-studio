@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
+import { duplicateLayer } from '../../core/commands.ts';
+import { SliderNumberControl } from './SliderNumberControl.tsx';
 import { project, selectedLayerId, selectedLayerIds, selectedLayer, updateLayer, removeLayer, reorderLayers, isPlaying, groupSelectedLayers, ungroupLayer } from '../../core/state.ts';
 import type { Layer, ImageLayer, TextLayer, EffectLayer, ShapeLayer, VideoLayer, BackgroundLogoLayer, GroupLayer } from '../../core/schema.ts';
 import { getGroupForLayer } from '../../core/groups.ts';
@@ -132,6 +134,13 @@ export function Sidebar({ onSeek }: { onSeek: (timeMs: number) => void }) {
                 </svg>
               </button>
               <div class="layer-actions">
+                <button type="button" class="layer-action-btn" title={`Duplicate ${layer.name} (Cmd/Ctrl+D)`}
+                  aria-label={`Duplicate ${layer.name}`} onClick={(e) => { e.stopPropagation(); duplicateLayer(layer.id); }}>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <rect x="8" y="8" width="12" height="12" rx="2" />
+                    <path d="M15 8V4H4v11h4" />
+                  </svg>
+                </button>
                 <button
                   class="layer-action-btn"
                   title={layer.locked ? 'Unlock' : 'Lock'}
@@ -220,6 +229,9 @@ export function Inspector() {
           </details>
 
           <div class="property-panel">
+            <button type="button" class="prop-upload-btn duplicate-layer-btn"
+              title="Duplicate with all settings and animation (Cmd/Ctrl+D)"
+              onClick={() => duplicateLayer(selected.id)}>{selected.type === 'group' ? 'Duplicate group and layers' : 'Duplicate layer'}</button>
             <div class="property-danger-zone">
               <button
                 class="danger-btn"
@@ -248,47 +260,6 @@ function PropSubheading({ label }: { label: string }) {
   return <div class="prop-subheading">{label}</div>;
 }
 
-function FontSizeControl({ value, onChange }: { value: number; onChange: (value: number) => void }) {
-  const [draft, setDraft] = useState(String(Math.round(value)));
-
-  useEffect(() => {
-    setDraft(String(Math.round(value)));
-  }, [value]);
-
-  const commit = (raw: string) => {
-    const entered = Number(raw);
-    if (!Number.isFinite(entered) || raw.trim() === '') {
-      setDraft(String(Math.round(value)));
-      return;
-    }
-    const next = Math.max(12, Math.min(300, Math.round(entered)));
-    setDraft(String(next));
-    if (next !== value) onChange(next);
-  };
-
-  return (
-    <>
-      <input type="range" min="12" max="300" step="1" value={value}
-        aria-label="Font size slider"
-        onInput={(e) => onChange(Number((e.target as HTMLInputElement).value))} />
-      <input type="number" min="12" max="300" step="1" value={draft}
-        class="prop-font-size-input" aria-label="Font size in pixels"
-        onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
-        onBlur={(e) => commit((e.target as HTMLInputElement).value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-          if (e.key === 'Escape') {
-            const input = e.target as HTMLInputElement;
-            input.value = String(Math.round(value));
-            setDraft(input.value);
-            input.blur();
-          }
-        }} />
-      <span class="prop-unit">px</span>
-    </>
-  );
-}
-
 function LaserNumberInput({ value, min, max, label, onCommit }: { value: number; min: number; max: number; label: string; onCommit: (number: number) => void }) {
   const [draft, setDraft] = useState(String(Math.round(value)));
   useEffect(() => setDraft(String(Math.round(value))), [value]);
@@ -310,7 +281,25 @@ function LaserNumberInput({ value, min, max, label, onCommit }: { value: number;
     onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />;
 }
 
-function setFirstKfValue(_layer: Layer, id: string, path: string[], value: number) {
+interface PropertyEdit {
+  /** How an animated property absorbs the edit: shift the curve, or scale it about zero. */
+  mode?: 'offset' | 'ratio';
+  min?: number;
+  max?: number;
+}
+
+/**
+ * Writes a property value for the playhead.
+ *
+ * With Auto-Key on this keyframes at the playhead. With it off, a property that is already
+ * animated has its whole curve moved, so the value shown becomes the value asked for and the
+ * animation keeps its shape. Writing only the first keyframe made these controls look dead on
+ * any layer with a keyframed entrance — the Version1 logo's scale runs 0.04 → 0.88 → 0.52, so
+ * dragging Scale only changed the invisible first frame.
+ */
+function setPropertyValue(_layer: Layer, id: string, path: string[], value: number, edit: PropertyEdit = {}) {
+  const { mode = 'offset', min = -Infinity, max = Infinity } = edit;
+  const clamp = (n: number) => Math.min(max, Math.max(min, n));
   const time = autoKeyframe.value ? currentTime.value : 0;
   updateLayer(id, l => {
     let obj = l as any;
@@ -321,17 +310,21 @@ function setFirstKfValue(_layer: Layer, id: string, path: string[], value: numbe
     if (autoKeyframe.value) {
       const existingIdx = kfs.findIndex((k: any) => k.time === time);
       if (existingIdx >= 0) {
-        kfs[existingIdx] = { ...kfs[existingIdx], value };
+        kfs[existingIdx] = { ...kfs[existingIdx], value: clamp(value) };
       } else {
-        kfs.push({ time, value, easing: 'ease-out' as const });
+        kfs.push({ time, value: clamp(value), easing: 'ease-out' as const });
         kfs.sort((a: any, b: any) => a.time - b.time);
       }
+    } else if (kfs.length > 1) {
+      const current = evaluateProperty(prop, currentTime.value);
+      // Scaling about zero is meaningless when the current value is zero, so shift instead.
+      const ratio = mode === 'ratio' && current !== 0 ? value / current : null;
+      const delta = value - current;
+      kfs = kfs.map((k: any) => ({ ...k, value: clamp(ratio === null ? k.value + delta : k.value * ratio) }));
+    } else if (kfs.length === 1) {
+      kfs[0] = { ...kfs[0], value: clamp(value) };
     } else {
-      if (kfs.length > 0) {
-        kfs[0] = { ...kfs[0], value };
-      } else {
-        kfs.push({ time: 0, value, easing: 'linear' });
-      }
+      kfs.push({ time: 0, value: clamp(value), easing: 'linear' });
     }
 
     const newProp = { keyframes: kfs };
@@ -393,30 +386,30 @@ function CommonProperties({ layer }: { layer: Layer }) {
           <option value="darken">Darken</option>
         </select>
       </PropertyRow>
-      <PropertyRow label="Opacity" tooltip="Layer transparency (0 = invisible, 1 = fully opaque)">
-        <input type="range" min="0" max="1" step="0.01" value={opacity}
-          onInput={(e) => setFirstKfValue(layer, layer.id, ['opacity'], parseFloat((e.target as HTMLInputElement).value))} />
+      <PropertyRow label="Opacity" tooltip="Layer transparency: 0% is invisible, 100% is fully opaque.">
+        <SliderNumberControl label="Opacity" displayScale={100} unit="%" min="0" max="1" step="0.01" value={opacity}
+          onValueChange={(value) => setPropertyValue(layer, layer.id, ['opacity'], value, { min: 0, max: 1 })} />
       </PropertyRow>
       {layer.type !== 'effect' && <>
-      <PropertyRow label="Pos Y" tooltip="Vertical position (0 = top, 0.5 = center, 1 = bottom)">
-        <input type="range" min="0" max="1" step="0.01" value={posY}
-          onInput={(e) => setFirstKfValue(layer, layer.id, ['position', 'y'], parseFloat((e.target as HTMLInputElement).value))} />
+      <PropertyRow label="Pos Y" tooltip="Vertical position of the element’s anchor: 0% is the top, 50% is the middle, 100% is the bottom.">
+        <SliderNumberControl label="Pos Y" displayScale={100} unit="%" fineStep={100 / project.value.settings.height} fineLabel="1 px" hint="0 = top · 50 = middle · 100 = bottom" min="0" max="1" step="0.01" value={posY}
+          onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'y'], value)} />
       </PropertyRow>
-      <PropertyRow label="Pos X" tooltip="Horizontal position (0 = left, 0.5 = center, 1 = right)">
-        <input type="range" min="0" max="1" step="0.01" value={posX}
-          onInput={(e) => setFirstKfValue(layer, layer.id, ['position', 'x'], parseFloat((e.target as HTMLInputElement).value))} />
+      <PropertyRow label="Pos X" tooltip="Horizontal position of the element’s anchor: 0% is the left edge, 50% is the centre, 100% is the right edge.">
+        <SliderNumberControl label="Pos X" displayScale={100} unit="%" fineStep={100 / project.value.settings.width} fineLabel="1 px" hint="0 = left · 50 = centre · 100 = right" min="0" max="1" step="0.01" value={posX}
+          onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'x'], value)} />
       </PropertyRow>
-      <PropertyRow label="Scale" tooltip="Uniform scale factor (1 = 100%)">
-        <input type="range" min="0" max="3" step="0.01" value={scX}
-          onInput={(e) => {
-            const v = parseFloat((e.target as HTMLInputElement).value);
-            setFirstKfValue(layer, layer.id, ['scale', 'x'], v);
-            setFirstKfValue(layer, layer.id, ['scale', 'y'], v);
+      <PropertyRow label="Scale" tooltip="Element size as a percentage: 100% is its base size, 50% is half size.">
+        <SliderNumberControl label="Scale" displayScale={100} unit="%" min="0" max="3" step="0.01" value={scX}
+          onValueChange={(value) => {
+            const v = value;
+            setPropertyValue(layer, layer.id, ['scale', 'x'], v, { mode: 'ratio', min: 0 });
+            setPropertyValue(layer, layer.id, ['scale', 'y'], v, { mode: 'ratio', min: 0 });
           }} />
       </PropertyRow>
-      <PropertyRow label="Rotation" tooltip="Rotation (-1 = -360°, 0 = none, 1 = 360°). Animatable with keyframes.">
-        <input type="range" min="-1" max="1" step="0.01" value={rot}
-          onInput={(e) => setFirstKfValue(layer, layer.id, ['rotation'], parseFloat((e.target as HTMLInputElement).value))} />
+      <PropertyRow label="Rotation" tooltip="Rotation in degrees: 0° is upright; 90° is a quarter turn. Animatable with keyframes.">
+        <SliderNumberControl label="Rotation" displayScale={360} unit="°" fineStep={0.1} min="-1" max="1" step="0.01" value={rot}
+          onValueChange={(value) => setPropertyValue(layer, layer.id, ['rotation'], value)} />
       </PropertyRow>
       </>}
       <PropertyRow label="In Time" tooltip="Time when this layer becomes visible (milliseconds)">
@@ -512,8 +505,8 @@ function ImageProperties({ layer }: { layer: ImageLayer }) {
       {layer.parallax && (
         <>
           <PropertyRow label="Start Y" tooltip="Vertical start position for parallax drift (-1 = above frame)">
-            <input type="range" min="-1" max="0" step="0.01" value={layer.parallaxStartY}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, parallaxStartY: parseFloat((e.target as HTMLInputElement).value) }) as Layer)} />
+            <SliderNumberControl label="Start Y" displayScale={100} unit="%" min="-1" max="0" step="0.01" value={layer.parallaxStartY}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, parallaxStartY: value }) as Layer)} />
           </PropertyRow>
           <PropertyRow label="Duration" tooltip="Time for the parallax transition in/out (ms)">
             <input type="number" min="0" step="100" value={layer.parallaxDuration} class="prop-num-input"
@@ -552,8 +545,9 @@ function TextProperties({ layer }: { layer: TextLayer }) {
         </select>
       </PropertyRow>
       <PropertyRow label="Size" tooltip="Font size in pixels. Animatable with keyframes.">
-        <FontSizeControl value={fontSize}
-          onChange={(size) => setFirstKfValue(layer, layer.id, ['fontSize'], size)} />
+        <SliderNumberControl label="Font size" min={12} max={300} step={1} value={fontSize}
+          onValueChange={(size) => setPropertyValue(layer, layer.id, ['fontSize'], size, { mode: 'ratio', min: 1 })} />
+        <span class="prop-unit">px</span>
       </PropertyRow>
       <PropertyRow label="Color" tooltip="Text fill color">
         <input type="color" value={layer.textColor}
@@ -567,14 +561,14 @@ function TextProperties({ layer }: { layer: TextLayer }) {
           <option value="right">Right</option>
         </select>
       </PropertyRow>
-      <PropertyRow label="Line H" tooltip="Line height multiplier (1.0 = tight, 1.5 = normal, 2+ = loose)">
-        <input type="range" min="0.8" max="3" step="0.1" value={layer.lineHeight}
-          onInput={(e) => updateLayer(layer.id, l => ({ ...l, lineHeight: parseFloat((e.target as HTMLInputElement).value) }))} />
-        <span class="prop-unit">{layer.lineHeight.toFixed(1)}</span>
+      <PropertyRow label="Line H" tooltip="Line height as a percentage of font size: 100% is tight, 150% is normal.">
+        <SliderNumberControl label="Line H" displayScale={100} unit="%" min="0.8" max="3" step="0.1" value={layer.lineHeight}
+          onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, lineHeight: value }))} />
+
       </PropertyRow>
       <PropertyRow label="Spacing" tooltip="Letter spacing in pixels (negative = tighter)">
-        <input type="range" min="-5" max="20" step="0.5" value={layer.letterSpacing}
-          onInput={(e) => updateLayer(layer.id, l => ({ ...l, letterSpacing: parseFloat((e.target as HTMLInputElement).value) }))} />
+        <SliderNumberControl label="Spacing" min="-5" max="20" step="0.5" value={layer.letterSpacing}
+          onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, letterSpacing: value }))} />
       </PropertyRow>
 
       <PropSubheading label="Headline Effect" />
@@ -603,16 +597,16 @@ function TextProperties({ layer }: { layer: TextLayer }) {
               onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, outlineColor: (e.target as HTMLInputElement).value } }))} />
           </PropertyRow>
           <PropertyRow label="Stroke" tooltip="Headline outline width in pixels">
-            <input type="range" min="0" max="24" step="1" value={layer.headlineEffect.outlineWidth}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, outlineWidth: Number((e.target as HTMLInputElement).value) } }))} />
-            <span class="prop-unit">{layer.headlineEffect.outlineWidth}px</span>
+            <SliderNumberControl label="Stroke" min="0" max="24" step="1" value={layer.headlineEffect.outlineWidth}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, outlineWidth: value } }))} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           {layer.headlineEffect.mode === 'stacked' && (
             <>
               <PropertyRow label="Offset" tooltip="Distance between stacked headline colours">
-                <input type="range" min="0" max="24" step="1" value={layer.headlineEffect.offset}
-                  onInput={(e) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, offset: Number((e.target as HTMLInputElement).value) } }))} />
-                <span class="prop-unit">{layer.headlineEffect.offset}px</span>
+                <SliderNumberControl label="Offset" min="0" max="24" step="1" value={layer.headlineEffect.offset}
+                  onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, headlineEffect: { ...(l as TextLayer).headlineEffect!, offset: value } }))} />
+                <span class="prop-unit">px</span>
               </PropertyRow>
               <PropertyRow label="Middle">
                 <input type="color" value={layer.headlineEffect.midColor}
@@ -639,8 +633,8 @@ function TextProperties({ layer }: { layer: TextLayer }) {
               onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as TextLayer).stroke, color: (e.target as HTMLInputElement).value } }))} />
           </PropertyRow>
           <PropertyRow label="Width">
-            <input type="range" min="1" max="10" step="1" value={layer.stroke.width}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as TextLayer).stroke, width: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Width" min="1" max="10" step="1" value={layer.stroke.width}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as TextLayer).stroke, width: value } }))} />
           </PropertyRow>
         </>
       )}
@@ -657,12 +651,12 @@ function TextProperties({ layer }: { layer: TextLayer }) {
               onInput={(e) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, color: (e.target as HTMLInputElement).value } }))} />
           </PropertyRow>
           <PropertyRow label="Blur">
-            <input type="range" min="0" max="30" step="1" value={layer.shadow.blur}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, blur: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Blur" min="0" max="30" step="1" value={layer.shadow.blur}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, blur: value } }))} />
           </PropertyRow>
           <PropertyRow label="Offset Y">
-            <input type="range" min="-10" max="10" step="1" value={layer.shadow.offsetY}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, offsetY: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Offset Y" min="-10" max="10" step="1" value={layer.shadow.offsetY}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, shadow: { ...(l as TextLayer).shadow, offsetY: value } }))} />
           </PropertyRow>
         </>
       )}
@@ -679,20 +673,20 @@ function TextProperties({ layer }: { layer: TextLayer }) {
               onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, color: (e.target as HTMLInputElement).value } }))} />
           </PropertyRow>
           <PropertyRow label="Opacity">
-            <input type="range" min="0" max="1" step="0.05" value={layer.background.opacity}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, opacity: parseFloat((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Opacity" displayScale={100} unit="%" min="0" max="1" step="0.05" value={layer.background.opacity}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, opacity: value } }))} />
           </PropertyRow>
           <PropertyRow label="Pad X">
-            <input type="range" min="0" max="80" step="2" value={layer.background.paddingX}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, paddingX: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Pad X" min="0" max="80" step="2" value={layer.background.paddingX}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, paddingX: value } }))} />
           </PropertyRow>
           <PropertyRow label="Pad Y">
-            <input type="range" min="0" max="40" step="2" value={layer.background.paddingY}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, paddingY: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Pad Y" min="0" max="40" step="2" value={layer.background.paddingY}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, paddingY: value } }))} />
           </PropertyRow>
           <PropertyRow label="Radius">
-            <input type="range" min="0" max="30" step="1" value={layer.background.cornerRadius}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, cornerRadius: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Radius" min="0" max="30" step="1" value={layer.background.cornerRadius}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, background: { ...(l as TextLayer).background, cornerRadius: value } }))} />
           </PropertyRow>
         </>
       )}
@@ -709,20 +703,20 @@ function TextProperties({ layer }: { layer: TextLayer }) {
               onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, color: (e.target as HTMLInputElement).value } }))} />
           </PropertyRow>
           <PropertyRow label="Width">
-            <input type="range" min="1" max="10" step="1" value={layer.border.width}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, width: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Width" min="1" max="10" step="1" value={layer.border.width}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, width: value } }))} />
           </PropertyRow>
           <PropertyRow label="Radius">
-            <input type="range" min="0" max="30" step="1" value={layer.border.cornerRadius}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, cornerRadius: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Radius" min="0" max="30" step="1" value={layer.border.cornerRadius}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, cornerRadius: value } }))} />
           </PropertyRow>
           <PropertyRow label="Pad X">
-            <input type="range" min="0" max="80" step="2" value={layer.border.paddingX}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, paddingX: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Pad X" min="0" max="80" step="2" value={layer.border.paddingX}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, paddingX: value } }))} />
           </PropertyRow>
           <PropertyRow label="Pad Y">
-            <input type="range" min="0" max="40" step="2" value={layer.border.paddingY}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, paddingY: parseInt((e.target as HTMLInputElement).value) } }))} />
+            <SliderNumberControl label="Pad Y" min="0" max="40" step="2" value={layer.border.paddingY}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, border: { ...(l as TextLayer).border, paddingY: value } }))} />
           </PropertyRow>
         </>
       )}
@@ -738,9 +732,9 @@ function TextProperties({ layer }: { layer: TextLayer }) {
       {layer.typewriter?.enabled && (
         <>
           <PropertyRow label="Speed" tooltip="Characters revealed per second">
-            <input type="range" min="5" max="100" step="5" value={layer.typewriter.speed}
-              onInput={(e) => updateLayer(layer.id, l => ({ ...l, typewriter: { ...(l as TextLayer).typewriter!, speed: parseInt((e.target as HTMLInputElement).value) } }))} />
-            <span class="prop-unit">{layer.typewriter.speed} ch/s</span>
+            <SliderNumberControl label="Speed" displayScale={100} unit="%" min="5" max="100" step="5" value={layer.typewriter.speed}
+              onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, typewriter: { ...(l as TextLayer).typewriter!, speed: value } }))} />
+            <span class="prop-unit">ch/s</span>
           </PropertyRow>
           <PropertyRow label="Cursor" tooltip="Show blinking cursor during typing">
             <input type="checkbox" checked={layer.typewriter.cursor}
@@ -795,24 +789,23 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'laser-beams' && (
         <>
           <PropertyRow label="Beams" tooltip="Use no more than three beams per the DJ Tony T guide">
-            <input type="range" min="0" max="3" step="1" value={cfg.count ?? 3}
-              onInput={(e) => updateConfig('count', Number((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.count ?? 3}</span>
+            <SliderNumberControl label="Beams" min="0" max="3" step="1" value={cfg.count ?? 3}
+              onValueChange={(value) => updateConfig('count', value)} />
+
           </PropertyRow>
           <PropertyRow label="Glow">
-            <input type="range" min="0" max="60" step="1" value={cfg.glow ?? 26}
-              onInput={(e) => updateConfig('glow', Number((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.glow ?? 26}px</span>
+            <SliderNumberControl label="Glow" min="0" max="60" step="1" value={cfg.glow ?? 26}
+              onValueChange={(value) => updateConfig('glow', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Speed" tooltip="How quickly the projector beams sweep across the screen. Zero holds them still.">
-            <input type="range" min="0" max="0.8" step="0.01" value={cfg.speed ?? DEFAULT_LASER_SPEED}
-              onInput={(e) => updateConfig('speed', Number((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{(cfg.speed ?? DEFAULT_LASER_SPEED).toFixed(2)}/s</span>
+            <SliderNumberControl label="Speed" displayScale={60} unit="/min" min="0" max="0.8" step="0.01" value={cfg.speed ?? DEFAULT_LASER_SPEED}
+              onValueChange={(value) => updateConfig('speed', value)} />
           </PropertyRow>
           <PropertyRow label="Sweep" tooltip="How far each beam swings to either side of its centre angle">
-            <input type="range" min="0" max="45" step="1" value={cfg.sweep ?? DEFAULT_LASER_SWEEP}
-              onInput={(e) => updateConfig('sweep', Number((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.sweep ?? DEFAULT_LASER_SWEEP}°</span>
+            <SliderNumberControl label="Sweep" min="0" max="45" step="1" value={cfg.sweep ?? DEFAULT_LASER_SWEEP}
+              onValueChange={(value) => updateConfig('sweep', value)} />
+            <span class="prop-unit">°</span>
           </PropertyRow>
           <div class="laser-origin-hint">Drag the numbered points on the canvas, or enter X and Y positions below.</div>
           {Array.from({ length: Math.max(0, Math.min(3, cfg.count ?? 3)) }, (_, index) => {
@@ -837,11 +830,9 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
                 </div>
               </PropertyRow>
               <PropertyRow label={`Angle ${index + 1}`} tooltip="Starting direction: 0° is up, negative aims left, positive aims right. Sweep moves around this angle.">
-                <input type="range" min="-180" max="180" step="1" value={angle}
+                <SliderNumberControl label={`Angle ${index + 1}`} min="-180" max="180" step="1" value={angle}
                   aria-label={`Beam ${index + 1} insertion angle slider`}
-                  onInput={(e) => updateLaserAngle(index, Number((e.target as HTMLInputElement).value))} />
-                <LaserNumberInput value={angle} min={-180} max={180} label={`Beam ${index + 1} insertion angle degrees`}
-                  onCommit={(degrees) => updateLaserAngle(index, degrees)} />
+                  onValueChange={(value) => updateLaserAngle(index, value)} />
                 <span class="prop-unit">°</span>
               </PropertyRow>
             </div>;
@@ -852,18 +843,18 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'spectrum' && (
         <>
           <PropertyRow label="Height">
-            <input type="range" min="200" max="1600" step="50" value={cfg.height ?? 900}
-              onInput={(e) => updateConfig('height', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.height ?? 900}px</span>
+            <SliderNumberControl label="Height" min="200" max="1600" step="50" value={cfg.height ?? 900}
+              onValueChange={(value) => updateConfig('height', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Offset">
-            <input type="range" min="0" max="200" step="5" value={cfg.bottomOffset ?? 40}
-              onInput={(e) => updateConfig('bottomOffset', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Offset" min="0" max="200" step="5" value={cfg.bottomOffset ?? 40}
+              onValueChange={(value) => updateConfig('bottomOffset', value)} />
           </PropertyRow>
           <PropertyRow label="Bars">
-            <input type="range" min="8" max="64" step="4" value={cfg.barCount ?? 32}
-              onInput={(e) => updateConfig('barCount', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.barCount ?? 32}</span>
+            <SliderNumberControl label="Bars" min="8" max="64" step="4" value={cfg.barCount ?? 32}
+              onValueChange={(value) => updateConfig('barCount', value)} />
+
           </PropertyRow>
         </>
       )}
@@ -871,17 +862,17 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'waveform' && (
         <>
           <PropertyRow label="Y Center">
-            <input type="range" min="0.1" max="0.9" step="0.01" value={cfg.yCenter ?? 0.61}
-              onInput={(e) => updateConfig('yCenter', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Y Center" displayScale={100} unit="%" min="0.1" max="0.9" step="0.01" value={cfg.yCenter ?? 0.61}
+              onValueChange={(value) => updateConfig('yCenter', value)} />
           </PropertyRow>
           <PropertyRow label="Height">
-            <input type="range" min="200" max="1800" step="50" value={cfg.height ?? 1200}
-              onInput={(e) => updateConfig('height', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.height ?? 1200}px</span>
+            <SliderNumberControl label="Height" min="200" max="1800" step="50" value={cfg.height ?? 1200}
+              onValueChange={(value) => updateConfig('height', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Line W">
-            <input type="range" min="1" max="12" step="1" value={cfg.lineWidth ?? 6}
-              onInput={(e) => updateConfig('lineWidth', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Line W" min="1" max="12" step="1" value={cfg.lineWidth ?? 6}
+              onValueChange={(value) => updateConfig('lineWidth', value)} />
           </PropertyRow>
         </>
       )}
@@ -889,13 +880,12 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'pulsing-logo' && (
         <>
           <PropertyRow label="Max Scale">
-            <input type="range" min="1" max="4" step="0.1" value={cfg.maxScale ?? 2.0}
-              onInput={(e) => updateConfig('maxScale', parseFloat((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{(cfg.maxScale ?? 2.0).toFixed(1)}x</span>
+            <SliderNumberControl label="Max Scale" displayScale={100} unit="%" min="1" max="4" step="0.1" value={cfg.maxScale ?? 2.0}
+              onValueChange={(value) => updateConfig('maxScale', value)} />
           </PropertyRow>
           <PropertyRow label="Opacity">
-            <input type="range" min="0" max="1" step="0.05" value={cfg.opacity ?? 1}
-              onInput={(e) => updateConfig('opacity', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Opacity" displayScale={100} unit="%" min="0" max="1" step="0.05" value={cfg.opacity ?? 1}
+              onValueChange={(value) => updateConfig('opacity', value)} />
           </PropertyRow>
           <PropertyRow label="Start">
             <input type="number" min="0" step="100" value={cfg.startTime ?? 0} class="prop-num-input"
@@ -908,9 +898,8 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'glitch' && (
         <>
           <PropertyRow label="Intensity">
-            <input type="range" min="0.1" max="3" step="0.1" value={cfg.intensity ?? 1.0}
-              onInput={(e) => updateConfig('intensity', parseFloat((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{(cfg.intensity ?? 1.0).toFixed(1)}x</span>
+            <SliderNumberControl label="Intensity" displayScale={100} unit="%" min="0.1" max="3" step="0.1" value={cfg.intensity ?? 1.0}
+              onValueChange={(value) => updateConfig('intensity', value)} />
           </PropertyRow>
         </>
       )}
@@ -918,16 +907,16 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'vignette' && (
         <>
           <PropertyRow label="Strength">
-            <input type="range" min="0.1" max="1" step="0.05" value={cfg.strength ?? 0.55}
-              onInput={(e) => updateConfig('strength', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Strength" displayScale={100} unit="%" min="0.1" max="1" step="0.05" value={cfg.strength ?? 0.55}
+              onValueChange={(value) => updateConfig('strength', value)} />
           </PropertyRow>
           <PropertyRow label="Inner R">
-            <input type="range" min="0" max="0.8" step="0.05" value={cfg.innerRadius ?? 0.3}
-              onInput={(e) => updateConfig('innerRadius', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Inner R" displayScale={60} unit="/min" min="0" max="0.8" step="0.05" value={cfg.innerRadius ?? 0.3}
+              onValueChange={(value) => updateConfig('innerRadius', value)} />
           </PropertyRow>
           <PropertyRow label="Outer R">
-            <input type="range" min="0.3" max="1.5" step="0.05" value={cfg.outerRadius ?? 0.8}
-              onInput={(e) => updateConfig('outerRadius', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Outer R" displayScale={100} unit="%" min="0.3" max="1.5" step="0.05" value={cfg.outerRadius ?? 0.8}
+              onValueChange={(value) => updateConfig('outerRadius', value)} />
           </PropertyRow>
           <PropertyRow label="Color">
             <select value={cfg.color ?? '0,0,0'}
@@ -944,17 +933,17 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'scanlines' && (
         <>
           <PropertyRow label="Spacing">
-            <input type="range" min="2" max="12" step="1" value={cfg.spacing ?? 4}
-              onInput={(e) => updateConfig('spacing', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.spacing ?? 4}px</span>
+            <SliderNumberControl label="Spacing" min="2" max="12" step="1" value={cfg.spacing ?? 4}
+              onValueChange={(value) => updateConfig('spacing', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Thick">
-            <input type="range" min="1" max="6" step="1" value={cfg.thickness ?? 2}
-              onInput={(e) => updateConfig('thickness', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Thick" min="1" max="6" step="1" value={cfg.thickness ?? 2}
+              onValueChange={(value) => updateConfig('thickness', value)} />
           </PropertyRow>
           <PropertyRow label="Opacity">
-            <input type="range" min="0.01" max="0.3" step="0.01" value={cfg.opacity ?? 0.05}
-              onInput={(e) => updateConfig('opacity', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Opacity" displayScale={100} unit="%" min="0.01" max="0.3" step="0.01" value={cfg.opacity ?? 0.05}
+              onValueChange={(value) => updateConfig('opacity', value)} />
           </PropertyRow>
           <PropertyRow label="Color">
             <input type="color" value={cfg.color ?? '#000000'}
@@ -966,25 +955,25 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'grid' && (
         <>
           <PropertyRow label="Spacing">
-            <input type="range" min="20" max="150" step="5" value={cfg.spacing ?? 60}
-              onInput={(e) => updateConfig('spacing', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.spacing ?? 60}px</span>
+            <SliderNumberControl label="Spacing" min="20" max="150" step="5" value={cfg.spacing ?? 60}
+              onValueChange={(value) => updateConfig('spacing', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Color">
             <input type="color" value={cfg.color ?? '#E8423F'}
               onInput={(e) => updateConfig('color', (e.target as HTMLInputElement).value)} />
           </PropertyRow>
           <PropertyRow label="Line W">
-            <input type="range" min="0.5" max="4" step="0.5" value={cfg.lineWidth ?? 1}
-              onInput={(e) => updateConfig('lineWidth', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Line W" min="0.5" max="4" step="0.5" value={cfg.lineWidth ?? 1}
+              onValueChange={(value) => updateConfig('lineWidth', value)} />
           </PropertyRow>
           <PropertyRow label="Speed">
-            <input type="range" min="0" max="5" step="0.5" value={cfg.speed ?? 1}
-              onInput={(e) => updateConfig('speed', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Speed" displayScale={100} unit="%" min="0" max="5" step="0.5" value={cfg.speed ?? 1}
+              onValueChange={(value) => updateConfig('speed', value)} />
           </PropertyRow>
           <PropertyRow label="Opacity">
-            <input type="range" min="0.01" max="0.2" step="0.01" value={cfg.opacity ?? 0.04}
-              onInput={(e) => updateConfig('opacity', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Opacity" displayScale={100} unit="%" min="0.01" max="0.2" step="0.01" value={cfg.opacity ?? 0.04}
+              onValueChange={(value) => updateConfig('opacity', value)} />
           </PropertyRow>
         </>
       )}
@@ -992,17 +981,17 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'corner-accents' && (
         <>
           <PropertyRow label="Margin">
-            <input type="range" min="10" max="100" step="5" value={cfg.margin ?? 40}
-              onInput={(e) => updateConfig('margin', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.margin ?? 40}px</span>
+            <SliderNumberControl label="Margin" min="10" max="100" step="5" value={cfg.margin ?? 40}
+              onValueChange={(value) => updateConfig('margin', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Length">
-            <input type="range" min="20" max="150" step="5" value={cfg.length ?? 60}
-              onInput={(e) => updateConfig('length', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Length" min="20" max="150" step="5" value={cfg.length ?? 60}
+              onValueChange={(value) => updateConfig('length', value)} />
           </PropertyRow>
           <PropertyRow label="Line W">
-            <input type="range" min="1" max="8" step="1" value={cfg.lineWidth ?? 3}
-              onInput={(e) => updateConfig('lineWidth', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Line W" min="1" max="8" step="1" value={cfg.lineWidth ?? 3}
+              onValueChange={(value) => updateConfig('lineWidth', value)} />
           </PropertyRow>
           <PropertyRow label="Color">
             <input type="color" value={cfg.color ?? '#E8423F'}
@@ -1014,18 +1003,18 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'sweep' && (
         <>
           <PropertyRow label="Speed">
-            <input type="range" min="0.3" max="3" step="0.1" value={cfg.speed ?? 1}
-              onInput={(e) => updateConfig('speed', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Speed" displayScale={100} unit="%" min="0.3" max="3" step="0.1" value={cfg.speed ?? 1}
+              onValueChange={(value) => updateConfig('speed', value)} />
           </PropertyRow>
           <PropertyRow label="Width">
-            <input type="range" min="50" max="500" step="25" value={cfg.sweepWidth ?? 200}
-              onInput={(e) => updateConfig('sweepWidth', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.sweepWidth ?? 200}px</span>
+            <SliderNumberControl label="Width" min="50" max="500" step="25" value={cfg.sweepWidth ?? 200}
+              onValueChange={(value) => updateConfig('sweepWidth', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Count">
-            <input type="range" min="1" max="6" step="1" value={cfg.count ?? 3}
-              onInput={(e) => updateConfig('count', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.count ?? 3}</span>
+            <SliderNumberControl label="Count" min="1" max="6" step="1" value={cfg.count ?? 3}
+              onValueChange={(value) => updateConfig('count', value)} />
+
           </PropertyRow>
         </>
       )}
@@ -1033,25 +1022,25 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'particles' && (
         <>
           <PropertyRow label="Max" tooltip="Maximum particle count on screen">
-            <input type="range" min="20" max="200" step="10" value={cfg.maxCount ?? 80}
-              onInput={(e) => updateConfig('maxCount', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.maxCount ?? 80}</span>
+            <SliderNumberControl label="Max" min="20" max="200" step="10" value={cfg.maxCount ?? 80}
+              onValueChange={(value) => updateConfig('maxCount', value)} />
+
           </PropertyRow>
           <PropertyRow label="Spawn" tooltip="Spawn probability per frame (higher = more particles)">
-            <input type="range" min="0.1" max="1" step="0.1" value={cfg.spawnRate ?? 0.7}
-              onInput={(e) => updateConfig('spawnRate', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Spawn" displayScale={100} unit="%" min="0.1" max="1" step="0.1" value={cfg.spawnRate ?? 0.7}
+              onValueChange={(value) => updateConfig('spawnRate', value)} />
           </PropertyRow>
           <PropertyRow label="Size Min">
-            <input type="range" min="1" max="10" step="1" value={cfg.sizeMin ?? 2}
-              onInput={(e) => updateConfig('sizeMin', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Size Min" min="1" max="10" step="1" value={cfg.sizeMin ?? 2}
+              onValueChange={(value) => updateConfig('sizeMin', value)} />
           </PropertyRow>
           <PropertyRow label="Size Max">
-            <input type="range" min="2" max="20" step="1" value={cfg.sizeMax ?? 5}
-              onInput={(e) => updateConfig('sizeMax', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Size Max" min="2" max="20" step="1" value={cfg.sizeMax ?? 5}
+              onValueChange={(value) => updateConfig('sizeMax', value)} />
           </PropertyRow>
           <PropertyRow label="Gravity" tooltip="Vertical pull (-0.5 = up, 0 = float, 0.5 = fall)">
-            <input type="range" min="-0.5" max="0.5" step="0.05" value={cfg.gravity ?? 0}
-              onInput={(e) => updateConfig('gravity', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Gravity" min="-0.5" max="0.5" step="0.05" value={cfg.gravity ?? 0}
+              onValueChange={(value) => updateConfig('gravity', value)} />
           </PropertyRow>
           <PropertyRow label="Color 1">
             <input type="color" value={cfg.color1 ?? '#E8423F'}
@@ -1071,8 +1060,8 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
               onInput={(e) => updateConfig('color', (e.target as HTMLInputElement).value)} />
           </PropertyRow>
           <PropertyRow label="Intensity" tooltip="Flash brightness (0-1)">
-            <input type="range" min="0.1" max="1" step="0.05" value={cfg.intensity ?? 0.8}
-              onInput={(e) => updateConfig('intensity', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Intensity" displayScale={100} unit="%" min="0.1" max="1" step="0.05" value={cfg.intensity ?? 0.8}
+              onValueChange={(value) => updateConfig('intensity', value)} />
           </PropertyRow>
           <PropertyRow label="Beat Div" tooltip="Beat division (1 = quarter, 2 = eighth, 0.5 = half)">
             <select value={cfg.beatDiv ?? 1}
@@ -1090,12 +1079,12 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'film-grain' && (
         <>
           <PropertyRow label="Intensity" tooltip="Grain visibility (0 = none, 1 = very noisy)">
-            <input type="range" min="0.05" max="0.8" step="0.05" value={cfg.intensity ?? 0.3}
-              onInput={(e) => updateConfig('intensity', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Intensity" displayScale={100} unit="%" min="0.05" max="0.8" step="0.05" value={cfg.intensity ?? 0.3}
+              onValueChange={(value) => updateConfig('intensity', value)} />
           </PropertyRow>
           <PropertyRow label="Size" tooltip="Grain pixel size (1 = fine, 4+ = coarse)">
-            <input type="range" min="1" max="6" step="1" value={cfg.grainSize ?? 2}
-              onInput={(e) => updateConfig('grainSize', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Size" min="1" max="6" step="1" value={cfg.grainSize ?? 2}
+              onValueChange={(value) => updateConfig('grainSize', value)} />
           </PropertyRow>
           <PropertyRow label="Mono" tooltip="Monochrome grain (off = color noise)">
             <input type="checkbox" checked={cfg.mono !== false}
@@ -1107,14 +1096,14 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'chromatic-aberration' && (
         <>
           <PropertyRow label="Intensity" tooltip="Pixel offset for RGB channel separation">
-            <input type="range" min="1" max="20" step="1" value={cfg.intensity ?? 4}
-              onInput={(e) => updateConfig('intensity', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.intensity ?? 4}px</span>
+            <SliderNumberControl label="Intensity" displayScale={100} unit="%" min="1" max="20" step="1" value={cfg.intensity ?? 4}
+              onValueChange={(value) => updateConfig('intensity', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Angle" tooltip="Direction of the color split (degrees)">
-            <input type="range" min="0" max="360" step="15" value={cfg.angle ?? 0}
-              onInput={(e) => updateConfig('angle', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.angle ?? 0}°</span>
+            <SliderNumberControl label="Angle" min="0" max="360" step="15" value={cfg.angle ?? 0}
+              onValueChange={(value) => updateConfig('angle', value)} />
+            <span class="prop-unit">°</span>
           </PropertyRow>
           <PropertyRow label="Edge Only" tooltip="Only apply near frame edges (cinematic lens effect)">
             <input type="checkbox" checked={cfg.edgeOnly ?? false}
@@ -1144,20 +1133,20 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
             </select>
           </PropertyRow>
           <PropertyRow label="Hue" tooltip="Hue rotation in degrees (-180 to 180)">
-            <input type="range" min="-180" max="180" step="5" value={cfg.hue ?? 0}
-              onInput={(e) => updateConfig('hue', parseInt((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Hue" min="-180" max="180" step="5" value={cfg.hue ?? 0}
+              onValueChange={(value) => updateConfig('hue', value)} />
           </PropertyRow>
           <PropertyRow label="Sat" tooltip="Saturation adjustment (-1 = desaturate, 0 = normal, 1 = vivid)">
-            <input type="range" min="-1" max="1" step="0.05" value={cfg.saturation ?? 0}
-              onInput={(e) => updateConfig('saturation', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Sat" displayScale={100} unit="%" min="-1" max="1" step="0.05" value={cfg.saturation ?? 0}
+              onValueChange={(value) => updateConfig('saturation', value)} />
           </PropertyRow>
           <PropertyRow label="Bright" tooltip="Brightness multiplier (-0.5 = dark, 0 = normal, 0.5 = bright)">
-            <input type="range" min="-0.5" max="0.5" step="0.05" value={cfg.brightness ?? 0}
-              onInput={(e) => updateConfig('brightness', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Bright" displayScale={100} unit="%" min="-0.5" max="0.5" step="0.05" value={cfg.brightness ?? 0}
+              onValueChange={(value) => updateConfig('brightness', value)} />
           </PropertyRow>
           <PropertyRow label="Contrast" tooltip="Contrast boost (-0.5 to 0.5)">
-            <input type="range" min="-0.5" max="0.5" step="0.05" value={cfg.contrast ?? 0}
-              onInput={(e) => updateConfig('contrast', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Contrast" displayScale={100} unit="%" min="-0.5" max="0.5" step="0.05" value={cfg.contrast ?? 0}
+              onValueChange={(value) => updateConfig('contrast', value)} />
           </PropertyRow>
         </>
       )}
@@ -1165,8 +1154,8 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'zoom-pulse' && (
         <>
           <PropertyRow label="Amount" tooltip="Zoom intensity per beat pulse">
-            <input type="range" min="0.01" max="0.15" step="0.01" value={cfg.amount ?? 0.03}
-              onInput={(e) => updateConfig('amount', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Amount" displayScale={100} unit="%" min="0.01" max="0.15" step="0.01" value={cfg.amount ?? 0.03}
+              onValueChange={(value) => updateConfig('amount', value)} />
           </PropertyRow>
           <PropertyRow label="Beat Div" tooltip="Beat division for pulse timing">
             <select value={cfg.beatDiv ?? 1}
@@ -1177,8 +1166,8 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
             </select>
           </PropertyRow>
           <PropertyRow label="Decay" tooltip="How quickly the pulse fades (higher = snappier)">
-            <input type="range" min="1" max="6" step="0.5" value={cfg.decay ?? 2}
-              onInput={(e) => updateConfig('decay', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Decay" min="1" max="6" step="0.5" value={cfg.decay ?? 2}
+              onValueChange={(value) => updateConfig('decay', value)} />
           </PropertyRow>
         </>
       )}
@@ -1186,9 +1175,9 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'blur-transition' && (
         <>
           <PropertyRow label="Max Blur" tooltip="Maximum blur radius in pixels">
-            <input type="range" min="2" max="50" step="2" value={cfg.maxBlur ?? 20}
-              onInput={(e) => updateConfig('maxBlur', parseInt((e.target as HTMLInputElement).value))} />
-            <span class="prop-unit">{cfg.maxBlur ?? 20}px</span>
+            <SliderNumberControl label="Max Blur" min="2" max="50" step="2" value={cfg.maxBlur ?? 20}
+              onValueChange={(value) => updateConfig('maxBlur', value)} />
+            <span class="prop-unit">px</span>
           </PropertyRow>
           <PropertyRow label="Start" tooltip="Start time of the blur effect (ms)">
             <input type="number" min="0" step="100" value={cfg.startTime ?? 0} class="prop-num-input"
@@ -1214,16 +1203,16 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
       {layer.effectType === 'parallax-drift' && (
         <>
           <PropertyRow label="Speed X" tooltip="Horizontal camera drift speed">
-            <input type="range" min="-0.1" max="0.1" step="0.005" value={cfg.speedX ?? 0.02}
-              onInput={(e) => updateConfig('speedX', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Speed X" displayScale={100} unit="%" min="-0.1" max="0.1" step="0.005" value={cfg.speedX ?? 0.02}
+              onValueChange={(value) => updateConfig('speedX', value)} />
           </PropertyRow>
           <PropertyRow label="Speed Y" tooltip="Vertical camera drift speed">
-            <input type="range" min="-0.1" max="0.1" step="0.005" value={cfg.speedY ?? 0.01}
-              onInput={(e) => updateConfig('speedY', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Speed Y" displayScale={100} unit="%" min="-0.1" max="0.1" step="0.005" value={cfg.speedY ?? 0.01}
+              onValueChange={(value) => updateConfig('speedY', value)} />
           </PropertyRow>
           <PropertyRow label="Zoom" tooltip="How much the frame zooms during drift">
-            <input type="range" min="0" max="0.2" step="0.01" value={cfg.zoomAmount ?? 0.05}
-              onInput={(e) => updateConfig('zoomAmount', parseFloat((e.target as HTMLInputElement).value))} />
+            <SliderNumberControl label="Zoom" displayScale={100} unit="%" min="0" max="0.2" step="0.01" value={cfg.zoomAmount ?? 0.05}
+              onValueChange={(value) => updateConfig('zoomAmount', value)} />
           </PropertyRow>
         </>
       )}
@@ -1241,9 +1230,9 @@ function EffectProperties({ layer }: { layer: EffectLayer }) {
           </PropertyRow>
           {(cfg.mode === 'kaleidoscope') && (
             <PropertyRow label="Segments" tooltip="Number of kaleidoscope segments">
-              <input type="range" min="4" max="12" step="2" value={cfg.segments ?? 6}
-                onInput={(e) => updateConfig('segments', parseInt((e.target as HTMLInputElement).value))} />
-              <span class="prop-unit">{cfg.segments ?? 6}</span>
+              <SliderNumberControl label="Segments" min="4" max="12" step="2" value={cfg.segments ?? 6}
+                onValueChange={(value) => updateConfig('segments', value)} />
+
             </PropertyRow>
           )}
         </>
@@ -1290,14 +1279,14 @@ function ShapeProperties({ layer }: { layer: ShapeLayer }) {
       </PropertyRow>
       {layer.stroke.enabled && (
         <PropertyRow label="Stroke W">
-          <input type="range" min="1" max="20" step="1" value={layer.stroke.width}
-            onInput={(e) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as ShapeLayer).stroke, width: parseInt((e.target as HTMLInputElement).value) } }))} />
+          <SliderNumberControl label="Stroke W" min="1" max="20" step="1" value={layer.stroke.width}
+            onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, stroke: { ...(l as ShapeLayer).stroke, width: value } }))} />
         </PropertyRow>
       )}
       {(layer.shapeType === 'rounded-rect') && (
         <PropertyRow label="Radius">
-          <input type="range" min="0" max="100" step="1" value={layer.cornerRadius}
-            onInput={(e) => updateLayer(layer.id, l => ({ ...l, cornerRadius: parseInt((e.target as HTMLInputElement).value) }))} />
+          <SliderNumberControl label="Radius" min="0" max="100" step="1" value={layer.cornerRadius}
+            onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, cornerRadius: value }))} />
         </PropertyRow>
       )}
     </>
@@ -1350,13 +1339,13 @@ function VideoProperties({ layer }: { layer: VideoLayer }) {
         </select>
       </PropertyRow>
       <PropertyRow label="Thick">
-        <input type="range" min="50" max={Math.max(1000, canvasHeight)} step="10" value={layer.thickness}
-          onInput={(e) => updateLayer(layer.id, l => ({ ...l, thickness: parseInt((e.target as HTMLInputElement).value) }))} />
-        <span class="prop-unit">{layer.thickness}px</span>
+        <SliderNumberControl label="Thick" min="50" max={Math.max(1000, canvasHeight)} step="10" value={layer.thickness}
+          onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, thickness: value }))} />
+        <span class="prop-unit">px</span>
       </PropertyRow>
       <PropertyRow label="Pan">
-        <input type="range" min="0" max="1" step="0.01" value={layer.videoPan}
-          onInput={(e) => updateLayer(layer.id, l => ({ ...l, videoPan: parseFloat((e.target as HTMLInputElement).value) }))} />
+        <SliderNumberControl label="Pan" displayScale={100} unit="%" min="0" max="1" step="0.01" value={layer.videoPan}
+          onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, videoPan: value }))} />
       </PropertyRow>
       <PropSubheading label="Fade" />
       <PropertyRow label="In Time">
@@ -1426,14 +1415,14 @@ function BgLogoProperties({ layer }: { layer: BackgroundLogoLayer }) {
         </button>
       </PropertyRow>
       <PropertyRow label="Scale">
-        <input type="range" min="0.1" max="3" step="0.05" value={layer.logoScale}
-          onInput={(e) => updateLayer(layer.id, l => ({ ...l, logoScale: parseFloat((e.target as HTMLInputElement).value) }))} />
-        <span class="prop-unit">{layer.logoScale.toFixed(2)}</span>
+        <SliderNumberControl label="Scale" displayScale={100} unit="%" min="0.1" max="3" step="0.05" value={layer.logoScale}
+          onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, logoScale: value }))} />
+
       </PropertyRow>
       <PropertyRow label="Speed">
-        <input type="range" min="0" max="1" step="0.01" value={layer.speed}
-          onInput={(e) => updateLayer(layer.id, l => ({ ...l, speed: parseFloat((e.target as HTMLInputElement).value) }))} />
-        <span class="prop-unit">{layer.speed.toFixed(2)}</span>
+        <SliderNumberControl label="Speed" displayScale={1000} unit="px/s" min="0" max="1" step="0.01" value={layer.speed}
+          onValueChange={(value) => updateLayer(layer.id, l => ({ ...l, speed: value }))} />
+
       </PropertyRow>
       <PropertyRow label="Direction">
         <select value={layer.clockDir}
@@ -1588,6 +1577,7 @@ const sidebarStyles = `
   opacity: 0;
   transition: opacity 0.15s;
 }
+.layer-item:focus-within .layer-actions,
 .layer-item:hover .layer-actions,
 .layer-item-selected .layer-actions { opacity: 1; }
 
@@ -1671,6 +1661,19 @@ const sidebarStyles = `
   min-width: 60px;
 }
 
+.duplicate-layer-btn { width: 100%; margin: 8px 0; }
+.prop-control { min-width: 0; }
+.prop-slider-number { flex: 1; min-width: 0; }
+.prop-slider-number-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.prop-slider-unit { color: var(--text-muted); font-size: 10px; min-width: 14px; }
+.prop-fine-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-top: 5px; font-size: 10px; color: var(--text-muted); }
+.prop-fine-controls button { padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px; font-size: 10px; color: var(--text-primary); background: var(--bg-tertiary); }
+.prop-fine-controls button:hover { border-color: var(--accent); }
+.prop-fine-shortcut { margin-left: auto; }
+.prop-fine-hint { width: 100%; font-size: 10px; }
+.prop-slider-number input[type="range"] { width: 0; min-width: 36px; }
+.prop-slider-number-input { width: 76px; flex: 0 0 76px; min-width: 0; padding: 4px; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+
 .prop-num-input {
   width: 70px !important;
   flex: 0 0 70px !important;
@@ -1683,15 +1686,6 @@ const sidebarStyles = `
 .laser-origin-fields label { display: flex; align-items: center; gap: 3px; }
 .laser-origin-fields input { width: 48px; padding: 3px 4px; text-align: center; font-size: 11px; }
 .laser-beam-settings .prop-control > input[type="number"] { width: 50px; min-width: 0; flex: 0 0 50px; padding: 3px 4px; text-align: center; font-size: 11px; }
-
-.prop-font-size-input {
-  width: 58px;
-  flex: 0 0 58px;
-  min-width: 0;
-  padding: 4px;
-  text-align: center;
-  font-size: 12px;
-}
 
 .prop-unit {
   font-size: 9px;

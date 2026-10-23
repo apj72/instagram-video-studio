@@ -2,6 +2,7 @@ import { signal, computed } from '@preact/signals';
 import type { Project, Layer } from './schema.ts';
 import { createDefaultProject } from './schema.ts';
 import { createLayerGroup } from './groups.ts';
+import { getAnimatedProperties } from '../timeline/properties.ts';
 
 export const project = signal<Project>(createDefaultProject());
 export const selectedLayerId = signal<string | null>(null);
@@ -11,6 +12,7 @@ export const isPlaying = signal(false);
 export const zoom = signal(1);
 export const showLabels = signal(false);
 export const autoKeyframe = signal(false);
+export const selectedPropertyName = signal<string>('opacity');
 export interface LibrarySource { kind: 'post' | 'template'; id: string; name: string; }
 export const librarySource = signal<LibrarySource | null>(null);
 
@@ -31,7 +33,23 @@ export function updateProject(updater: (p: Project) => Project) {
 export function updateLayer(layerId: string, updater: (l: Layer) => Layer) {
   updateProject(p => ({
     ...p,
-    layers: p.layers.map(l => l.id === layerId ? updater(l) : l),
+    layers: p.layers.map(l => {
+      if (l.id !== layerId) return l;
+      const next = updater(l);
+      // Reveal the property whose key was written, including edits made on the canvas.
+      if (autoKeyframe.value && selectedLayerId.value === layerId) {
+        const previous = getAnimatedProperties(l);
+        const changed = getAnimatedProperties(next).filter(entry => {
+          const frame = entry.prop.keyframes.find(key => key.time === currentTime.value);
+          if (!frame) return false;
+          const old = previous.find(prop => prop.name === entry.name)?.prop.keyframes.find(key => key.time === frame.time);
+          return !old || old.value !== frame.value;
+        });
+        const reveal = changed.find(entry => entry.name === selectedPropertyName.value) ?? changed[0];
+        if (reveal) selectedPropertyName.value = reveal.name;
+      }
+      return next;
+    }),
   }));
 }
 

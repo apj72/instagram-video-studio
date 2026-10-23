@@ -1,7 +1,10 @@
-import { Output, Mp4OutputFormat, BufferTarget, CanvasSource, AudioBufferSource, QUALITY_HIGH } from 'mediabunny';
+import { Output, Mp4OutputFormat, BufferTarget, CanvasSource } from 'mediabunny';
 import type { Project } from '../core/schema.ts';
 import type { ExportPreset } from '../core/schema.ts';
 import { renderFrame } from '../render/engine.ts';
+import { alignExportedVideo, checkAudioAlignmentService } from './audioAlignment.ts';
+import { createExportVideoAssets } from './videoAssets.ts';
+import { exportPcmWav } from './pcmAudio.ts';
 import { seekVideoAssets } from '../render/videoSync.ts';
 import { getAudioBuffer, getLoadedAudioAssetId } from '../audio/analyser.ts';
 
@@ -15,27 +18,6 @@ export interface ExportProgress {
 
 export type ProgressCallback = (progress: ExportProgress) => void;
 
-function trimAudioBuffer(
-  buffer: AudioBuffer,
-  startMs: number,
-  endMs: number,
-  ctx: OfflineAudioContext,
-): AudioBuffer {
-  const sr = buffer.sampleRate;
-  const startSample = Math.floor((startMs / 1000) * sr);
-  const endSample = Math.min(buffer.length, Math.ceil((endMs / 1000) * sr));
-  const length = endSample - startSample;
-  if (length <= 0) return ctx.createBuffer(buffer.numberOfChannels, 1, sr);
-
-  const trimmed = ctx.createBuffer(buffer.numberOfChannels, length, sr);
-  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-    const src = buffer.getChannelData(ch);
-    const dst = trimmed.getChannelData(ch);
-    dst.set(src.subarray(startSample, endSample));
-  }
-  return trimmed;
-}
-
 export async function exportMp4(
   project: Project,
   assets: Map<string, HTMLImageElement | HTMLVideoElement>,
@@ -43,154 +25,100 @@ export async function exportMp4(
   onProgress: ProgressCallback,
   abortSignal?: AbortSignal,
 ): Promise<Blob | null> {
-  const { width, height, duration, fps } = project.settings;
-  const totalFrames = Math.ceil((duration / 1000) * fps);
-  const frameDuration = 1 / fps;
+  // Freeze the edit state, and give each video layer an independent decoder for this render.
+  project = structuredClone(project);
+  const media = await createExportVideoAssets(project, assets, abortSignal);
+  project = media.project;
+  assets = media.assets;
+  try {
+    const { width, height, duration, fps } = project.settings;
+    const totalFrames = Math.ceil((duration / 1000) * fps);
+    const frameDuration = 1 / fps;
 
-  const canvas = new OffscreenCanvas(width, height);
-  // H.264 output is SDR; convert wide-gamut photos to sRGB before encoding.
-  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
-  if (!ctx) throw new Error('Failed to create OffscreenCanvas 2D context');
+    const canvas = new OffscreenCanvas(width, height);
+    // H.264 output is SDR; convert wide-gamut photos to sRGB before encoding.
+    const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
+    if (!ctx) throw new Error('Failed to create OffscreenCanvas 2D context');
 
-  const target = new BufferTarget();
+    const target = new BufferTarget();
 
-  const videoSource = new CanvasSource(canvas, {
-    codec: 'avc',
-    bitrate: preset.bitrate,
-    keyFrameInterval: 2,
-  });
-
-  const audioBuffer = getAudioBuffer();
-  if (project.audio.assetId && (getLoadedAudioAssetId() !== project.audio.assetId || !audioBuffer)) {
-    throw new Error('The audio file is not loaded. Choose it again in Audio before exporting.');
-  }
-  const hasAudio = !!project.audio.assetId && audioBuffer !== null && !project.audio.muted;
-
-  let audioSource: AudioBufferSource | null = null;
-  if (hasAudio) {
-    audioSource = new AudioBufferSource({
-      codec: 'aac',
-      quality: QUALITY_HIGH,
-    });
-  }
-
-  const output = new Output({
-    format: new Mp4OutputFormat({ fastStart: 'in-memory' }),
-    target,
-  });
-
-  output.addVideoTrack(videoSource);
-  if (audioSource) {
-    output.addAudioTrack(audioSource);
-  }
-  await output.start();
-
-  for (let frame = 0; frame < totalFrames; frame++) {
-    if (abortSignal?.aborted) {
-      return null;
-    }
-
-    const timeMs = (frame / fps) * 1000;
-    const frameNumber = frame;
-
-    // Park video layers on this exact frame; left to play freely they barely advance,
-    // because frames render far faster than real time.
-    await seekVideoAssets(project, assets, timeMs);
-    renderFrame(project, ctx as unknown as CanvasRenderingContext2D, timeMs, frameNumber, assets, null);
-
-    await videoSource.add(frame * frameDuration, Math.min(frameDuration, duration / 1000 - frame * frameDuration));
-
-    if (frame % 10 === 0 || frame === totalFrames - 1) {
-      onProgress({
-        phase: 'encoding',
-        currentFrame: frame + 1,
-        totalFrames,
-        percent: ((frame + 1) / totalFrames) * 90,
-      });
-    }
-  }
-
-  if (audioSource && audioBuffer) {
-    onProgress({
-      phase: 'muxing-audio',
-      currentFrame: totalFrames,
-      totalFrames,
-      percent: 92,
+    const videoSource = new CanvasSource(canvas, {
+      codec: 'avc',
+      bitrate: preset.bitrate,
+      keyFrameInterval: 2,
     });
 
-    const offlineCtx = new OfflineAudioContext(
-      audioBuffer.numberOfChannels,
-      audioBuffer.length,
-      audioBuffer.sampleRate,
-    );
+    const audioBuffer = getAudioBuffer();
+    if (project.audio.assetId && (getLoadedAudioAssetId() !== project.audio.assetId || !audioBuffer)) {
+      throw new Error('The audio file is not loaded. Choose it again in Audio before exporting.');
+    }
+    const hasAudio = !!project.audio.assetId && audioBuffer !== null && !project.audio.muted;
 
-    const offset = project.audio.offset;
-    const trimStart = project.audio.trim.start;
-    const trimEnd = project.audio.trim.end > 0 ? project.audio.trim.end : duration;
-    const trimmed = trimAudioBuffer(audioBuffer, trimStart + offset, Math.min(trimEnd + offset, duration + offset), offlineCtx);
+    if (hasAudio) await checkAudioAlignmentService(abortSignal, true);
 
-    const vol = project.audio.volume;
-    if (vol < 1) {
-      for (let ch = 0; ch < trimmed.numberOfChannels; ch++) {
-        const data = trimmed.getChannelData(ch);
-        for (let i = 0; i < data.length; i++) {
-          data[i] *= vol;
-        }
+    const pcmAudio = hasAudio && audioBuffer ? exportPcmWav(audioBuffer, project.audio, duration) : undefined;
+
+    const output = new Output({
+      format: new Mp4OutputFormat({ fastStart: 'in-memory' }),
+      target,
+    });
+
+    output.addVideoTrack(videoSource);
+    await output.start();
+
+    for (let frame = 0; frame < totalFrames; frame++) {
+      if (abortSignal?.aborted) {
+        return null;
+      }
+
+      const timeMs = (frame / fps) * 1000;
+      const frameNumber = frame;
+
+      // Park video layers on this exact frame; left to play freely they barely advance,
+      // because frames render far faster than real time.
+      await seekVideoAssets(project, assets, timeMs, 10000, abortSignal);
+      renderFrame(project, ctx as unknown as CanvasRenderingContext2D, timeMs, frameNumber, assets, null);
+
+      await videoSource.add(frame * frameDuration, Math.min(frameDuration, duration / 1000 - frame * frameDuration));
+
+      if (frame % 10 === 0 || frame === totalFrames - 1) {
+        onProgress({
+          phase: 'encoding',
+          currentFrame: frame + 1,
+          totalFrames,
+          percent: ((frame + 1) / totalFrames) * 90,
+        });
       }
     }
 
-    await audioSource.add(trimmed);
-  }
-
-  onProgress({
-    phase: 'finalizing',
-    currentFrame: totalFrames,
-    totalFrames,
-    percent: 95,
-  });
-
-  await output.finalize();
-
-  const buffer = target.buffer;
-  if (!buffer) {
     onProgress({
-      phase: 'error',
+      phase: 'finalizing',
       currentFrame: totalFrames,
       totalFrames,
-      percent: 100,
-      error: 'No output buffer produced',
+      percent: 95,
     });
-    return null;
+
+    await output.finalize();
+
+    const buffer = target.buffer;
+    if (!buffer) {
+      onProgress({
+        phase: 'error',
+        currentFrame: totalFrames,
+        totalFrames,
+        percent: 100,
+        error: 'No output buffer produced',
+      });
+      return null;
+    }
+
+    const encoded = new Blob([buffer], { type: 'video/mp4' });
+    const result = hasAudio ? await alignExportedVideo(encoded, duration, abortSignal, pcmAudio) : encoded;
+    onProgress({ phase: 'done', currentFrame: totalFrames, totalFrames, percent: 100 });
+    return result;
+  } finally {
+    media.dispose();
   }
-
-  onProgress({
-    phase: 'done',
-    currentFrame: totalFrames,
-    totalFrames,
-    percent: 100,
-  });
-
-  const encoded = new Blob([buffer], { type: 'video/mp4' });
-  if (!hasAudio) return encoded;
-
-  let aligned: Response;
-  try {
-    aligned = await fetch('/api/video/align-duration', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'video/mp4',
-        'X-Target-Duration-Seconds': String(duration / 1000),
-      },
-      body: encoded,
-      signal: abortSignal,
-    });
-  } catch (cause) {
-    if (abortSignal?.aborted) throw cause;
-    throw new Error('Exact audio alignment requires the local server with FFmpeg.');
-  }
-  if (aligned.status === 404) throw new Error('Exact audio alignment requires the local server with FFmpeg.');
-  if (!aligned.ok) throw new Error(await aligned.text() || 'Could not align audio with the video duration.');
-  return aligned.blob();
 }
 
 export function downloadBlob(blob: Blob, filename: string) {

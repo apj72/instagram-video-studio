@@ -1,7 +1,10 @@
-import { useState, useCallback, useRef } from 'preact/hooks';
+import { useState, useCallback, useEffect, useRef } from 'preact/hooks';
 import { project } from '../core/state.ts';
+import { loadMediaFolder } from '../core/persistence.ts';
+import { requestDirectoryPermission, saveExportToConfiguredFolder } from '../core/mediaFolders.ts';
 import { EXPORT_PRESETS } from '../core/schema.ts';
 import type { ExportPreset } from '../core/schema.ts';
+import { AudioAlignmentError, alignExportedVideo } from '../export/audioAlignment.ts';
 import type { ExportProgress } from '../export/encoder.ts';
 import { exportMp4, exportFallback, downloadBlob, supportsWebCodecs } from '../export/encoder.ts';
 
@@ -16,14 +19,27 @@ export function ExportDialog({ assets, onClose }: ExportDialogProps) {
   const [exporting, setExporting] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const hasWebCodecs = supportsWebCodecs();
+  const pendingExport = useRef<AudioAlignmentError | null>(null);
+  const [destinationFolder, setDestinationFolder] = useState<FileSystemDirectoryHandle | null>(null);
+
+  useEffect(() => {
+    void loadMediaFolder('destination').then(setDestinationFolder).catch(() => setDestinationFolder(null));
+  }, []);
 
   const handleExport = useCallback(async () => {
-    setExporting(true);
-    abortRef.current = new AbortController();
-
     try {
+      if (destinationFolder && !await requestDirectoryPermission(destinationFolder, 'readwrite')) {
+        throw new Error('Permission to save in the selected destination folder was not granted. Choose another folder in Project settings.');
+      }
+      setProgress({ phase: pendingExport.current ? 'finalizing' : 'encoding', currentFrame: 0, totalFrames: 0, percent: pendingExport.current ? 95 : 0 });
+      setExporting(true);
+      abortRef.current = new AbortController();
       let blob: Blob | null;
-      if (hasWebCodecs) {
+      if (pendingExport.current) {
+        blob = await alignExportedVideo(pendingExport.current.encoded, pendingExport.current.durationMs, abortRef.current.signal, pendingExport.current.pcmAudio);
+        pendingExport.current = null;
+        setProgress({ phase: 'done', currentFrame: 0, totalFrames: 0, percent: 100 });
+      } else if (hasWebCodecs) {
         blob = await exportMp4(project.value, assets, preset, setProgress, abortRef.current.signal);
       } else {
         if (project.value.audio.assetId && !project.value.audio.muted) {
@@ -35,20 +51,24 @@ export function ExportDialog({ assets, onClose }: ExportDialogProps) {
       if (blob) {
         const ext = hasWebCodecs ? 'mp4' : 'webm';
         const name = project.value.metadata.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-        downloadBlob(blob, `${name}.${ext}`);
+        const filename = `${name}.${ext}`;
+        const saved = destinationFolder ? await saveExportToConfiguredFolder(blob, filename) : false;
+        if (!saved) downloadBlob(blob, filename);
+        setProgress({ phase: 'done', currentFrame: 0, totalFrames: 0, percent: 100 });
       }
     } catch (err) {
+      if (err instanceof AudioAlignmentError) pendingExport.current = err;
       setProgress({
         phase: 'error',
         currentFrame: 0,
         totalFrames: 0,
         percent: 0,
-        error: String(err),
+        error: err instanceof Error ? err.message : String(err),
       });
     } finally {
       setExporting(false);
     }
-  }, [assets, preset, hasWebCodecs]);
+  }, [assets, preset, hasWebCodecs, destinationFolder]);
 
   const handleCancel = useCallback(() => {
     if (abortRef.current) {
@@ -116,14 +136,16 @@ export function ExportDialog({ assets, onClose }: ExportDialogProps) {
 
         {progress?.phase === 'done' && !exporting && (
           <div class="export-body">
-            <div class="export-done">Export complete! File downloaded.</div>
+            <div class="export-done">{destinationFolder ? `Export saved to ${destinationFolder.name}.` : 'Export complete! File downloaded.'}</div>
             <button class="toolbar-btn" onClick={onClose}>Close</button>
           </div>
         )}
 
-        {progress?.phase === 'error' && (
+        {progress?.phase === 'error' && !exporting && (
           <div class="export-body">
             <div class="export-error">Export failed: {progress.error}</div>
+            {pendingExport.current && <p class="export-retry-note">Your video has finished rendering. Retry to finish the export without rendering again.</p>}
+            <button class="toolbar-btn toolbar-btn-primary" onClick={handleExport}>Retry export</button>
             <button class="toolbar-btn" onClick={onClose}>Close</button>
           </div>
         )}
@@ -264,6 +286,8 @@ const exportStyles = `
   text-align: center;
   margin-bottom: 16px;
 }
+
+.export-retry-note { font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; }
 
 .export-error {
   font-size: 12px;

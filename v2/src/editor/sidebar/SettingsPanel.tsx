@@ -1,5 +1,7 @@
-import { useCallback, useState } from 'preact/hooks';
+import { useCallback, useEffect, useState } from 'preact/hooks';
 import { project, updateProject } from '../../core/state.ts';
+import { loadMediaFolder, saveMediaFolder } from '../../core/persistence.ts';
+import { canPickMediaFolders, pickMediaFolder, requestDirectoryPermission } from '../../core/mediaFolders.ts';
 import { showSafeAreas, safeAreaPreset } from '../canvas/CanvasViewport.tsx';
 import { TONY_BRAND_ASSETS } from '../../templates/tonyBrand.ts';
 import { BackgroundPhotoDialog } from '../BackgroundPhotoDialog.tsx';
@@ -17,6 +19,38 @@ export function SettingsPanel() {
   const backgroundMotion = settings.backgroundMotion ?? { direction: 'none', startTime: 0, duration: 1000 };
   const meta = project.value.metadata;
   const [showPhotoPicker, setShowPhotoPicker] = useState(false);
+  const [sourceFolder, setSourceFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  const [destinationFolder, setDestinationFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  const [folderError, setFolderError] = useState('');
+
+  useEffect(() => {
+    void Promise.all([loadMediaFolder('source'), loadMediaFolder('destination')])
+      .then(([source, destination]) => { setSourceFolder(source); setDestinationFolder(destination); })
+      .catch(() => setFolderError('Could not load saved folder settings.'));
+  }, []);
+
+  const chooseFolder = useCallback(async (key: 'source' | 'destination') => {
+    setFolderError('');
+    try {
+      const handle = await pickMediaFolder(key === 'source' ? 'read' : 'readwrite');
+      if (!await requestDirectoryPermission(handle, key === 'source' ? 'read' : 'readwrite')) {
+        setFolderError(`Permission to use the ${key} folder was not granted.`);
+        return;
+      }
+      await saveMediaFolder(key, handle);
+      if (key === 'source') setSourceFolder(handle);
+      else setDestinationFolder(handle);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      setFolderError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  const clearFolder = useCallback(async (key: 'source' | 'destination') => {
+    await saveMediaFolder(key, null);
+    if (key === 'source') setSourceFolder(null);
+    else setDestinationFolder(null);
+  }, []);
 
   const handleNameChange = useCallback((e: Event) => {
     const name = (e.target as HTMLInputElement).value;
@@ -179,6 +213,20 @@ export function SettingsPanel() {
             />
           </div>
         </div>
+        <div class="prop-subheading settings-motion-heading">Media folders</div>
+        <p class="settings-folder-help">Choose folders on this device. Folder permissions are stored in this browser.</p>
+        <div class="settings-folder-row">
+          <div><strong>Source media</strong><span>{sourceFolder?.name ?? 'No folder selected'}</span></div>
+          {sourceFolder && <button type="button" title="Clear source media folder" onClick={() => void clearFolder('source')}>Clear</button>}
+          <button type="button" disabled={!canPickMediaFolders()} onClick={() => void chooseFolder('source')}>{sourceFolder ? 'Change' : 'Choose'}</button>
+        </div>
+        <div class="settings-folder-row">
+          <div><strong>Save exports to</strong><span>{destinationFolder?.name ?? 'Browser downloads (default)'}</span></div>
+          {destinationFolder && <button type="button" title="Clear export destination" onClick={() => void clearFolder('destination')}>Clear</button>}
+          <button type="button" disabled={!canPickMediaFolders()} onClick={() => void chooseFolder('destination')}>{destinationFolder ? 'Change' : 'Choose'}</button>
+        </div>
+        {!canPickMediaFolders() && <p class="settings-folder-help">Local folder selection is available in Chrome or Edge.</p>}
+        {folderError && <p class="settings-folder-error" role="alert">{folderError}</p>}
         <div class="prop-row" title="Show Instagram-safe overlay guides on canvas">
           <label class="prop-label">Safe areas</label>
           <div class="prop-control settings-safe-row">
@@ -260,6 +308,16 @@ const settingsStyles = `
 .settings-content {
   padding: 8px 14px;
 }
+
+.settings-folder-help { margin: 3px 14px 8px; color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+.settings-folder-row { display:flex; align-items:center; gap:5px; padding:6px 14px; }
+.settings-folder-row > div { min-width:0; flex:1; display:flex; flex-direction:column; gap:2px; }
+.settings-folder-row strong { color:var(--text-secondary); font-size:10px; font-weight:600; }
+.settings-folder-row span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); font-size:10px; }
+.settings-folder-row button { padding:4px 7px; border-radius:var(--radius-sm); background:var(--bg-elevated); color:var(--text-secondary); font-size:10px; }
+.settings-folder-row button:hover:not(:disabled) { background:var(--border-hover); color:var(--text-primary); }
+.settings-folder-row button:disabled { opacity:.45; }
+.settings-folder-error { margin:5px 14px 8px; color:#ff7c7c; font-size:10px; }
 
 .settings-num-input {
   width: 70px;

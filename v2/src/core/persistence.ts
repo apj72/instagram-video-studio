@@ -2,10 +2,11 @@ import { signal } from '@preact/signals';
 import type { Project } from './schema.ts';
 
 const DB_NAME = 'version1-studio';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const PROJECTS_STORE = 'projects';
 const ASSETS_STORE = 'assets';
 const LIBRARY_STORE = 'library';
+const FOLDERS_STORE = 'folders';
 const AUTOSAVE_KEY = '__autosave__';
 
 export const savedProjects = signal<ProjectListEntry[]>([]);
@@ -58,8 +59,34 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(LIBRARY_STORE)) {
         db.createObjectStore(LIBRARY_STORE, { keyPath: 'id' });
       }
+      if (!db.objectStoreNames.contains(FOLDERS_STORE)) {
+        db.createObjectStore(FOLDERS_STORE, { keyPath: 'id' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export type MediaFolderKey = 'source' | 'destination';
+
+export async function saveMediaFolder(key: MediaFolderKey, handle: FileSystemDirectoryHandle | null): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const t = tx(db, FOLDERS_STORE, 'readwrite');
+    if (handle) t.objectStore(FOLDERS_STORE).put({ id: key, handle });
+    else t.objectStore(FOLDERS_STORE).delete(key);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+}
+
+export async function loadMediaFolder(key: MediaFolderKey): Promise<FileSystemDirectoryHandle | null> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const req = tx(db, FOLDERS_STORE, 'readonly').objectStore(FOLDERS_STORE).get(key);
+    req.onsuccess = () => resolve((req.result as { handle?: FileSystemDirectoryHandle } | undefined)?.handle ?? null);
     req.onerror = () => reject(req.error);
   });
 }

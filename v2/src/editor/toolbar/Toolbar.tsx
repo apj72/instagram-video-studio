@@ -8,11 +8,10 @@ interface ToolbarProps {
   onSave: () => void;
   onNewFromTemplate: () => void;
   onCaptureImage: () => void;
-  onOpenConfigs: () => void;
   onOpenPosts: () => void;
 }
 
-export function Toolbar({ onImportV1, onExport, onSave, onNewFromTemplate, onCaptureImage, onOpenConfigs, onOpenPosts }: ToolbarProps) {
+export function Toolbar({ onImportV1, onExport, onSave, onNewFromTemplate, onCaptureImage, onOpenPosts }: ToolbarProps) {
   return (
     <div class="toolbar">
       <div class="toolbar-brand">
@@ -42,7 +41,6 @@ export function Toolbar({ onImportV1, onExport, onSave, onNewFromTemplate, onCap
         <button class="toolbar-btn" onClick={onNewFromTemplate} title="Start from a pre-built template">Templates</button>
         <button class="toolbar-btn" onClick={onImportV1} title="Import a V1 project configuration">Import V1</button>
         <button class="toolbar-btn" onClick={onCaptureImage} title="Save current frame as PNG">Screenshot</button>
-        <button class="toolbar-btn" onClick={onOpenConfigs} title="Manage designs — save, load, import/export JSON">Designs</button>
         <button class="toolbar-btn" onClick={onOpenPosts} title="View generated post thumbnails and JSON jobs">Posts</button>
         <button class="toolbar-btn" onClick={onSave} title="Save or update a post or template (Cmd+S)">Save / Save As</button>
         <button class="toolbar-btn toolbar-btn-primary" onClick={onExport}>Export MP4</button>

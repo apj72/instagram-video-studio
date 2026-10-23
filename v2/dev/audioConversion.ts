@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,22 +9,28 @@ import type { Plugin } from 'vite';
 const run = promisify(execFile);
 const MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 
-async function writeUpload(request: IncomingMessage, path: string): Promise<void> {
-  const output = createWriteStream(path);
-  let size = 0;
+async function writeUpload(request: IncomingMessage, path: string, pcmPath?: string, videoBytes?: number): Promise<void> {
+  const output = await open(path, 'w');
+  let pcm: Awaited<ReturnType<typeof open>> | undefined;
+  let size = 0, audioBytes = 0;
+  let remainingVideo = pcmPath ? videoBytes! : Infinity;
   try {
+    if (pcmPath) pcm = await open(pcmPath, 'w');
     for await (const chunk of request) {
-      size += chunk.length;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
       if (size > MAX_MEDIA_BYTES) throw new Error('Media file exceeds the 2 GB limit.');
-      if (!output.write(chunk)) await new Promise<void>(resolve => output.once('drain', resolve));
+      const split = Math.min(bytes.length, remainingVideo);
+      if (split > 0) await output.writeFile(bytes.subarray(0, split));
+      if (pcm && split < bytes.length) {
+        await pcm.writeFile(bytes.subarray(split));
+        audioBytes += bytes.length - split;
+      }
+      remainingVideo -= split;
     }
-    await new Promise<void>((resolve, reject) => {
-      output.once('error', reject);
-      output.end(resolve);
-    });
-  } catch (cause) {
-    output.destroy();
-    throw cause;
+    if (pcm && (remainingVideo !== 0 || audioBytes === 0)) throw new Error('Incomplete video/audio upload.');
+  } finally {
+    await Promise.all([output.close(), pcm?.close()]);
   }
 }
 
@@ -49,13 +54,13 @@ async function convertFlac(request: IncomingMessage, response: ServerResponse): 
   const folder = await mkdtemp(join(tmpdir(), 'studio-flac-'));
   try {
     const input = join(folder, 'source.flac');
-    const output = join(folder, 'decoded.m4a');
+    const output = join(folder, 'decoded.wav');
     await writeUpload(request, input);
     await runFfmpeg(['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', input,
-      '-vn', '-c:a', 'aac', '-b:a', '256k', output]);
+      '-vn', '-c:a', 'pcm_f32le', output]);
     const bytes = await readFile(output);
     response.writeHead(200, {
-      'Content-Type': 'audio/mp4',
+      'Content-Type': 'audio/wav',
       'Content-Length': bytes.length,
       'Cache-Control': 'no-store',
     }).end(bytes);
@@ -68,6 +73,16 @@ async function convertFlac(request: IncomingMessage, response: ServerResponse): 
 }
 
 async function alignVideoDuration(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method === 'GET') {
+    try {
+      await runFfmpeg(['-version']);
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ available: true, pcmAudio: true }));
+    } catch {
+      response.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        .end(JSON.stringify({ available: false, error: 'FFmpeg is unavailable. Restart the local studio server with FFmpeg installed.' }));
+    }
+    return;
+  }
   if (request.method !== 'POST') { response.writeHead(405, { Allow: 'POST' }).end(); return; }
   const seconds = Number(request.headers['x-target-duration-seconds']);
   if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 86400) {
@@ -78,11 +93,20 @@ async function alignVideoDuration(request: IncomingMessage, response: ServerResp
   try {
     const input = join(folder, 'source.mp4');
     const output = join(folder, 'aligned.mp4');
-    await writeUpload(request, input);
+    const pcmAudio = request.headers['x-video-bytes'] !== undefined;
+    const videoBytes = Number(request.headers['x-video-bytes']);
+    if (pcmAudio && (!Number.isSafeInteger(videoBytes) || videoBytes <= 0 || videoBytes >= MAX_MEDIA_BYTES)) {
+      response.writeHead(400).end('Invalid video length.');
+      return;
+    }
+    const wav = join(folder, 'audio.wav');
+    await writeUpload(request, input, pcmAudio ? wav : undefined, videoBytes);
     const end = String(seconds);
     await runFfmpeg(['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', input,
+      ...(pcmAudio ? ['-i', wav, '-map', '0:v:0', '-map', '1:a:0'] : []),
       '-t', end, '-filter:a', `atrim=0:${end},asetpts=PTS-STARTPTS`,
-      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', output]);
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k', '-use_editlist', '1',
+      '-movie_timescale', '1000000', '-movflags', '+faststart', output]);
     const bytes = await readFile(output);
     response.writeHead(200, {
       'Content-Type': 'video/mp4',

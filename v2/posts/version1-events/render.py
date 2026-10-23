@@ -189,6 +189,8 @@ async def main():
             hero_ms = 2400
             hero = base64.b64decode(await page.evaluate(GRAB, [hero_ms, 1]))
             (folder / 'poster.jpg').write_bytes(hero)
+            # The Posts dialog looks for thumbnail.jpg beside the project JSON.
+            (folder / 'thumbnail.jpg').write_bytes(hero)
             (ROOT / 'public/assets/version1' / f'preview-{slug}.jpg').write_bytes(hero)
             print(f'{slug}: frames written', flush=True)
 

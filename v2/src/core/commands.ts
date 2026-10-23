@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals';
-import { project } from './state.ts';
+import { project, selectedLayerId, selectedLayerIds, isPlaying } from './state.ts';
+import { duplicateProjectLayer } from './duplicateLayer.ts';
 import type { Project } from './schema.ts';
 
 export interface Command {
@@ -81,9 +82,37 @@ export function batchCommand(label: string, commands: Command[]): Command {
   };
 }
 
+export function duplicateLayer(layerId: string): void {
+  const before = project.value;
+  const result = duplicateProjectLayer(before, layerId);
+  if (!result.duplicateId) return;
+  const previousSelection = selectedLayerId.value;
+  const previousMultiSelection = [...selectedLayerIds.value];
+  isPlaying.value = false;
+  executeCommand({
+    label: 'Duplicate layer',
+    execute() {
+      project.value = result.project;
+      selectedLayerIds.value = [];
+      selectedLayerId.value = result.duplicateId;
+    },
+    undo() {
+      project.value = before;
+      selectedLayerId.value = previousSelection;
+      selectedLayerIds.value = previousMultiSelection;
+    },
+  });
+}
+
 export function initKeyboardShortcuts() {
   document.addEventListener('keydown', (e: KeyboardEvent) => {
     const isMeta = e.metaKey || e.ctrlKey;
+    const editing = e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+    if (isMeta && !e.altKey && !editing && e.key.toLowerCase() === 'd' && selectedLayerId.value) {
+      e.preventDefault();
+      duplicateLayer(selectedLayerId.value);
+      return;
+    }
     if (isMeta && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
       undo();

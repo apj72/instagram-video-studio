@@ -28,20 +28,31 @@ function element(assets: Map<string, HTMLImageElement | HTMLVideoElement>, layer
   return asset;
 }
 
-function seekTo(video: HTMLVideoElement, target: number, timeoutMs: number): Promise<void> {
-  return new Promise(resolve => {
+function seekTo(video: HTMLVideoElement, target: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
     let settled = false;
-    const done = () => {
+    const cleanup = () => {
+      video.removeEventListener('seeked', done);
+      video.removeEventListener('error', failed);
+      signal?.removeEventListener('abort', aborted);
+      clearTimeout(timer);
+    };
+    const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
-      video.removeEventListener('seeked', done);
-      clearTimeout(timer);
-      resolve();
+      cleanup();
+      if (error) reject(error); else resolve();
     };
-    // A decoder that never fires `seeked` must not stall a whole export.
-    const timer = setTimeout(done, timeoutMs);
+    const done = () => finish();
+    const failed = () => finish(new Error('Could not decode a background video frame. Try exporting again.'));
+    const aborted = () => finish(new DOMException('Export cancelled', 'AbortError'));
+    // A slow decoder must produce an error instead of silently encoding a stale frame.
+    const timer = setTimeout(() => finish(new Error('Timed out waiting for a background video frame. Try exporting again.')), timeoutMs);
     video.addEventListener('seeked', done);
-    video.currentTime = target;
+    video.addEventListener('error', failed);
+    signal?.addEventListener('abort', aborted, { once: true });
+    if (signal?.aborted) { aborted(); return; }
+    try { video.currentTime = target; } catch { failed(); }
   });
 }
 
@@ -53,16 +64,18 @@ export async function seekVideoAssets(
   project: Project,
   assets: Map<string, HTMLImageElement | HTMLVideoElement>,
   timeMs: number,
-  timeoutMs = 250,
+  timeoutMs = 10000,
+  signal?: AbortSignal,
 ): Promise<void> {
   const pending: Promise<void>[] = [];
   for (const layer of videoLayers(project.layers)) {
+    if (!layer.visible || timeMs < layer.inTime || timeMs > layer.outTime) continue;
     const video = element(assets, layer);
     if (!video) continue;
     if (!video.paused) video.pause();
     const target = videoSourceTime(layer, video.duration, timeMs);
-    if (Math.abs(video.currentTime - target) < 1 / 120) continue;
-    pending.push(seekTo(video, target, timeoutMs));
+    if (!video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - target) < 1e-6) continue;
+    pending.push(seekTo(video, target, timeoutMs, signal));
   }
   await Promise.all(pending);
 }

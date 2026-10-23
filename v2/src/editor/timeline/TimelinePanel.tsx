@@ -1,8 +1,8 @@
 import { useRef, useCallback, useEffect, useLayoutEffect, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { signal } from '@preact/signals';
-import { project, currentTime, selectedLayerId, selectedLayerIds, zoom, updateLayer } from '../../core/state.ts';
+import { project, currentTime, selectedLayerId, selectedLayerIds, zoom, updateLayer, selectedPropertyName } from '../../core/state.ts';
 import { getGroupForLayer } from '../../core/groups.ts';
+import { getAnimatedProperties } from '../../timeline/properties.ts';
 import { evaluateProperty } from '../../timeline/interpolation.ts';
 import { getLayerEvents, getVisibleSpan } from '../../timeline/events.ts';
 import type { Layer, AnimatedProperty, EasingType, Keyframe } from '../../core/schema.ts';
@@ -12,28 +12,6 @@ interface TimelinePanelProps {
   onSeek: (timeMs: number) => void;
 }
 
-export const selectedPropertyName = signal<string>('opacity');
-
-interface AnimPropEntry {
-  name: string;
-  path: string[];
-  prop: AnimatedProperty;
-}
-
-function getAnimatedProperties(layer: Layer): AnimPropEntry[] {
-  const entries: AnimPropEntry[] = [
-    { name: 'opacity', path: ['opacity'], prop: layer.opacity },
-    { name: 'pos X', path: ['position', 'x'], prop: layer.position.x },
-    { name: 'pos Y', path: ['position', 'y'], prop: layer.position.y },
-    { name: 'scale X', path: ['scale', 'x'], prop: layer.scale.x },
-    { name: 'scale Y', path: ['scale', 'y'], prop: layer.scale.y },
-    { name: 'rotation', path: ['rotation'], prop: layer.rotation },
-  ];
-  if (layer.type === 'text') {
-    entries.push({ name: 'fontSize', path: ['fontSize'], prop: layer.fontSize });
-  }
-  return entries;
-}
 
 function setNestedProp(obj: Record<string, unknown>, path: string[], value: unknown): Record<string, unknown> {
   if (path.length === 1) {
@@ -108,6 +86,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
   const playheadPct = dur > 0 ? (time / dur) * 100 : 0;
   const propName = selectedPropertyName.value;
   const activeLayer = layers.find(layer => layer.id === selectedLayerId.value);
+  const activeKeyframeCount = activeLayer ? getAnimatedProperties(activeLayer).find(entry => entry.name === propName)?.prop.keyframes.length : 0;
   const events = activeLayer ? getLayerEvents(activeLayer, dur) : [];
 
   useEffect(() => {
@@ -120,7 +99,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     const playheadX = (currentTime.value / dur) * tracks.scrollWidth;
     tracks.scrollLeft = Math.max(0, playheadX - tracks.clientWidth / 2);
     if (rulerRef.current) rulerRef.current.scrollLeft = tracks.scrollLeft;
-  }, [selectedLayerId.value, layers.length, dur]);
+  }, [selectedLayerId.value, layers.length, dur, propName, activeKeyframeCount]);
 
   const jumpEvent = (direction: -1 | 1) => {
     const ordered = direction === 1 ? events : [...events].reverse();
@@ -157,14 +136,15 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
     const entry = entries.find(e => e.name === propName);
     if (!entry) return;
 
-    const timeMs = clickPct * dur;
+    const timeMs = Math.round(Math.max(0, Math.min(1, clickPct)) * dur);
     const value = evaluateProperty(entry.prop, timeMs);
     const newKf: Keyframe = { time: timeMs, value, easing: 'linear' };
-    const newKeyframes = [...entry.prop.keyframes, newKf].sort((a, b) => a.time - b.time);
+    const newKeyframes = [...entry.prop.keyframes.filter(frame => frame.time !== timeMs), newKf].sort((a, b) => a.time - b.time);
     const newProp: AnimatedProperty = { keyframes: newKeyframes };
 
     updateLayer(layerId, l => setNestedProp(l as unknown as Record<string, unknown>, entry.path, newProp) as unknown as Layer);
-  }, [propName, dur]);
+    onSeek(timeMs);
+  }, [propName, dur, onSeek]);
 
   const handleKeyframeMouseDown = useCallback((
     e: MouseEvent,
@@ -331,7 +311,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
             <div class="ruler-inner" style={{ width: `${totalWidth}%` }}>
               <TimeRulerMarks durationMs={dur} zoom={z} />
               {showBeats && beatIntervalMs > 0 && <BeatMarkers durationMs={dur} beatIntervalMs={beatIntervalMs} />}
-              <div class="timeline-playhead" style={{ left: `${playheadPct / z}%` }} />
+              <div class="timeline-playhead" style={{ left: `${playheadPct}%` }} />
             </div>
           </div>
           <div
@@ -387,7 +367,7 @@ export function TimelinePanel({ onSeek }: TimelinePanelProps) {
                           />
                         );
                       })}
-                    <div class="timeline-playhead-track" style={{ left: `${playheadPct / z}%` }} />
+                    <div class="timeline-playhead-track" style={{ left: `${playheadPct}%` }} />
                   </div>
                 </div>
               );

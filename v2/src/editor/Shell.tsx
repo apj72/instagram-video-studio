@@ -14,7 +14,6 @@ import { Sidebar, Inspector } from './sidebar/Sidebar.tsx';
 import { TimelinePanel } from './timeline/TimelinePanel.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
 import { TemplateDialog } from './TemplateDialog.tsx';
-import { ConfigManager } from './ConfigManager.tsx';
 import { PostsDialog } from './PostsDialog.tsx';
 import { SaveLibraryDialog } from './SaveLibraryDialog.tsx';
 import { CanvasViewport } from './canvas/CanvasViewport.tsx';
@@ -31,7 +30,6 @@ export function Shell() {
   const rafRef = useRef(0);
   const [showExport, setShowExport] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
-  const [showConfigs, setShowConfigs] = useState(false);
   const [showPosts, setShowPosts] = useState(false);
   const [showSave, setShowSave] = useState(false);
   const [looping, setLooping] = useState(previewClock.loop);
@@ -337,7 +335,7 @@ export function Shell() {
 
   return (
     <div class="shell">
-      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} onNewFromTemplate={() => setShowTemplates(true)} onCaptureImage={handleCaptureImage} onOpenConfigs={() => setShowConfigs(true)} onOpenPosts={() => setShowPosts(true)} />
+      <Toolbar onImportV1={handleImportV1} onExport={handleExport} onSave={handleSave} onNewFromTemplate={() => setShowTemplates(true)} onCaptureImage={handleCaptureImage} onOpenPosts={() => setShowPosts(true)} />
       <div class="shell-main">
         <Sidebar onSeek={handleSeek} />
         <div class="shell-canvas-area">
@@ -394,9 +392,6 @@ export function Shell() {
       )}
       {showTemplates && (
         <TemplateDialog onClose={() => setShowTemplates(false)} />
-      )}
-      {showConfigs && (
-        <ConfigManager canvasRef={canvasRef} onClose={() => setShowConfigs(false)} />
       )}
       {showPosts && <PostsDialog onClose={() => setShowPosts(false)} />}
       {showSave && <SaveLibraryDialog projectId={projectIdRef.current} onClose={() => setShowSave(false)} />}

@@ -391,14 +391,26 @@ function CommonProperties({ layer }: { layer: Layer }) {
           onValueChange={(value) => setPropertyValue(layer, layer.id, ['opacity'], value, { min: 0, max: 1 })} />
       </PropertyRow>
       {layer.type !== 'effect' && <>
-      <PropertyRow label="Pos Y" tooltip="Vertical position of the element’s anchor: 0% is the top, 50% is the middle, 100% is the bottom.">
-        <SliderNumberControl label="Pos Y" displayScale={100} unit="%" fineStep={100 / project.value.settings.height} fineLabel="1 px" hint="0 = top · 50 = middle · 100 = bottom" min="0" max="1" step="0.01" value={posY}
-          onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'y'], value)} />
-      </PropertyRow>
-      <PropertyRow label="Pos X" tooltip="Horizontal position of the element’s anchor: 0% is the left edge, 50% is the centre, 100% is the right edge.">
-        <SliderNumberControl label="Pos X" displayScale={100} unit="%" fineStep={100 / project.value.settings.width} fineLabel="1 px" hint="0 = left · 50 = centre · 100 = right" min="0" max="1" step="0.01" value={posX}
-          onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'x'], value)} />
-      </PropertyRow>
+      {layer.type === 'video' ? (layer.orientation === 'horizontal' ? (
+        <PropertyRow label="Cut Y" tooltip="Vertical position of the horizontal video cut: 0% is the top, 50% is the middle, 100% is the bottom.">
+          <SliderNumberControl label="Cut Y" displayScale={100} unit="%" fineStep={100 / project.value.settings.height} fineLabel="1 px" hint="0 = top · 50 = middle · 100 = bottom" min="0" max="1" step="0.01" value={posY}
+            onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'y'], value)} />
+        </PropertyRow>
+      ) : (
+        <PropertyRow label="Cut X" tooltip="Horizontal position of the vertical video cut: 0% is the left edge, 50% is the middle, 100% is the right edge.">
+          <SliderNumberControl label="Cut X" displayScale={100} unit="%" fineStep={100 / project.value.settings.width} fineLabel="1 px" hint="0 = left · 50 = middle · 100 = right" min="0" max="1" step="0.01" value={posX}
+            onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'x'], value)} />
+        </PropertyRow>
+      )) : <>
+        <PropertyRow label="Pos Y" tooltip="Vertical position of the element’s anchor: 0% is the top, 50% is the middle, 100% is the bottom.">
+          <SliderNumberControl label="Pos Y" displayScale={100} unit="%" fineStep={100 / project.value.settings.height} fineLabel="1 px" hint="0 = top · 50 = middle · 100 = bottom" min="0" max="1" step="0.01" value={posY}
+            onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'y'], value)} />
+        </PropertyRow>
+        <PropertyRow label="Pos X" tooltip="Horizontal position of the element’s anchor: 0% is the left edge, 50% is the centre, 100% is the right edge.">
+          <SliderNumberControl label="Pos X" displayScale={100} unit="%" fineStep={100 / project.value.settings.width} fineLabel="1 px" hint="0 = left · 50 = centre · 100 = right" min="0" max="1" step="0.01" value={posX}
+            onValueChange={(value) => setPropertyValue(layer, layer.id, ['position', 'x'], value)} />
+        </PropertyRow>
+      </>}
       <PropertyRow label="Scale" tooltip="Element size as a percentage: 100% is its base size, 50% is half size.">
         <SliderNumberControl label="Scale" displayScale={100} unit="%" min="0" max="3" step="0.01" value={scX}
           onValueChange={(value) => {
@@ -1331,7 +1343,7 @@ function VideoProperties({ layer }: { layer: VideoLayer }) {
           },
         }))}>Fill canvas</button>
       </PropertyRow>
-      <PropertyRow label="Orient">
+      <PropertyRow label="Cut axis">
         <select value={layer.orientation}
           onChange={(e) => updateLayer(layer.id, l => ({ ...l, orientation: (e.target as HTMLSelectElement).value as 'horizontal' | 'vertical' }))}>
           <option value="horizontal">Horizontal</option>
@@ -1368,22 +1380,46 @@ function VideoProperties({ layer }: { layer: VideoLayer }) {
         <select value={layer.slideIn}
           onChange={(e) => updateLayer(layer.id, l => ({ ...l, slideIn: (e.target as HTMLSelectElement).value as VideoLayer['slideIn'] }))}>
           <option value="none">None</option>
-          <option value="top">Top</option>
-          <option value="bottom">Bottom</option>
-          <option value="left">Left</option>
-          <option value="right">Right</option>
+        <option value="top">From top</option>
+        <option value="bottom">From bottom</option>
+        <option value="left">From left</option>
+        <option value="right">From right</option>
         </select>
       </PropertyRow>
+      {layer.slideIn !== 'none' && <>
+        <PropertyRow label="Start">
+          <input type="number" min="0" step="100" value={layer.slideInTime} class="prop-num-input" aria-label="Video slice slide in start"
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, slideInTime: Math.max(0, parseInt((e.target as HTMLInputElement).value) || 0) }))} />
+          <span class="prop-unit">ms</span>
+        </PropertyRow>
+        <PropertyRow label="Duration">
+          <input type="number" min="0" step="100" value={layer.slideInDuration} class="prop-num-input" aria-label="Video slice slide in duration"
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, slideInDuration: Math.max(0, parseInt((e.target as HTMLInputElement).value) || 0) }))} />
+          <span class="prop-unit">ms</span>
+        </PropertyRow>
+      </>}
       <PropertyRow label="Out">
         <select value={layer.slideOut}
           onChange={(e) => updateLayer(layer.id, l => ({ ...l, slideOut: (e.target as HTMLSelectElement).value as VideoLayer['slideOut'] }))}>
           <option value="none">None</option>
-          <option value="top">Top</option>
-          <option value="bottom">Bottom</option>
-          <option value="left">Left</option>
-          <option value="right">Right</option>
+        <option value="top">To top</option>
+        <option value="bottom">To bottom</option>
+        <option value="left">To left</option>
+        <option value="right">To right</option>
         </select>
       </PropertyRow>
+      {layer.slideOut !== 'none' && <>
+        <PropertyRow label="Start">
+          <input type="number" min="0" step="100" value={layer.slideOutTime} class="prop-num-input" aria-label="Video slice slide out start"
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, slideOutTime: Math.max(0, parseInt((e.target as HTMLInputElement).value) || 0) }))} />
+          <span class="prop-unit">ms</span>
+        </PropertyRow>
+        <PropertyRow label="Duration">
+          <input type="number" min="0" step="100" value={layer.slideOutDuration} class="prop-num-input" aria-label="Video slice slide out duration"
+            onInput={(e) => updateLayer(layer.id, l => ({ ...l, slideOutDuration: Math.max(0, parseInt((e.target as HTMLInputElement).value) || 0) }))} />
+          <span class="prop-unit">ms</span>
+        </PropertyRow>
+      </>}
     </>
   );
 }

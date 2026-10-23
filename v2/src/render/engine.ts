@@ -332,22 +332,30 @@ function renderVideoLayer(rc: RenderContext, layer: VideoLayer) {
   const isHorizontal = layer.orientation === 'horizontal';
   const sliceThick = layer.thickness;
 
-  let sliceX = isHorizontal ? 0 : width * evaluateProperty(layer.position.x, timeMs) - sliceThick / 2;
-  let sliceY = isHorizontal ? height * evaluateProperty(layer.position.y, timeMs) - sliceThick / 2 : 0;
-  let sliceW = isHorizontal ? width : sliceThick;
-  let sliceH = isHorizontal ? sliceThick : height;
+  const sliceX = isHorizontal ? 0 : width * evaluateProperty(layer.position.x, timeMs) - sliceThick / 2;
+  const sliceY = isHorizontal ? height * evaluateProperty(layer.position.y, timeMs) - sliceThick / 2 : 0;
+  const sliceW = isHorizontal ? width : sliceThick;
+  const sliceH = isHorizontal ? sliceThick : height;
+  let offsetX = 0;
+  let offsetY = 0;
 
-  if (layer.slideIn !== 'none' && timeMs >= layer.slideInTime && timeMs < layer.slideInTime + layer.slideInDuration) {
-    const p = easeOutCubic((timeMs - layer.slideInTime) / layer.slideInDuration);
-    const offsets = getSlideOffset(layer.slideIn, width, height);
-    sliceX += offsets.x * (1 - p);
-    sliceY += offsets.y * (1 - p);
+  if (layer.slideIn !== 'none') {
+    if (timeMs < layer.slideInTime) return;
+    if (layer.slideInDuration > 0 && timeMs < layer.slideInTime + layer.slideInDuration) {
+      const p = 1 - easeOutCubic((timeMs - layer.slideInTime) / layer.slideInDuration);
+      const offsets = getSlideOffset(layer.slideIn, width, height);
+      offsetX += offsets.x * p;
+      offsetY += offsets.y * p;
+    }
   }
-  if (layer.slideOut !== 'none' && timeMs >= layer.slideOutTime && timeMs < layer.slideOutTime + layer.slideOutDuration) {
-    const p = easeOutCubic((timeMs - layer.slideOutTime) / layer.slideOutDuration);
-    const offsets = getSlideOffset(layer.slideOut, width, height);
-    sliceX += offsets.x * p;
-    sliceY += offsets.y * p;
+  if (layer.slideOut !== 'none') {
+    if (timeMs >= layer.slideOutTime + layer.slideOutDuration) return;
+    if (timeMs >= layer.slideOutTime && layer.slideOutDuration > 0) {
+      const p = easeOutCubic((timeMs - layer.slideOutTime) / layer.slideOutDuration);
+      const offsets = getSlideOffset(layer.slideOut, width, height);
+      offsetX += offsets.x * p;
+      offsetY += offsets.y * p;
+    }
   }
 
   ctx.save();
@@ -363,13 +371,13 @@ function renderVideoLayer(rc: RenderContext, layer: VideoLayer) {
   if (isHorizontal) {
     dh = sliceH; dw = dh * aspect;
     if (dw < sliceW) { dw = sliceW; dh = dw / aspect; }
-    dx = sliceX + (sliceW - dw) * 0.5 + (sliceW - dw) * layer.videoPan * 0.5;
-    dy = sliceY + (sliceH - dh) * 0.5;
+    dx = sliceX + (sliceW - dw) * 0.5 + offsetX;
+    dy = sliceY + (sliceH - dh) * layer.videoPan + offsetY;
   } else {
     dw = sliceW; dh = dw / aspect;
     if (dh < sliceH) { dh = sliceH; dw = dh * aspect; }
-    dx = sliceX + (sliceW - dw) * 0.5;
-    dy = sliceY + (sliceH - dh) * 0.5 + (sliceH - dh) * layer.videoPan * 0.5;
+    dx = sliceX + (sliceW - dw) * layer.videoPan + offsetX;
+    dy = sliceY + (sliceH - dh) * 0.5 + offsetY;
   }
   ctx.drawImage(video, dx, dy, dw, dh);
   ctx.restore();
